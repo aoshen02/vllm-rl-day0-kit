@@ -63,8 +63,8 @@ merged checkpoint 当成 adapter 服务；它必须是独立进程，避免共�
 ```text
 worktree: /home/aoshen/vime/projects/vime-training-inference-mismatch/worktrees/vllm-mla-kv-b-lora
 branch:   codex/fix-mla-kv-b-lora
-base:     f12b80c6ef (当前 upstream main)
-commits:  331e858d2f (correctness) + ad90d0c618 (reuse refactor)
+base:     da64db78b9 (提交时的 upstream main)
+commit:   9275633c73
 PR:       https://github.com/vllm-project/vllm/pull/49007
 state:    clean、已推送至 aoshen02 fork
 ```
@@ -73,7 +73,6 @@ state:    clean、已推送至 aoshen02 fork
 
 ```text
 vllm/lora/ops/triton_ops/mla_kv_b_lora.py
-vllm/lora/ops/triton_ops/routed_lora_matmul.py
 vllm/lora/ops/triton_ops/__init__.py
 vllm/lora/layers/column_parallel_linear.py
 vllm/lora/model_manager.py
@@ -83,9 +82,7 @@ tests/lora/test_lora_manager.py
 ```
 
 实现用显式 `token -> adapter` mapping，而不是假定 batch 中所有 token 共用一个
-adapter。三个 MLA correction 共享一个 `routed_lora_two_stage` primitive；权重统一
-表示为 `(loras, heads, input, output)` logical view，head 维为 1 时广播，同时支持
-`B_K/B_V` 的 non-contiguous per-head slice。MLA adapter 只构造以下三种 view：
+adapter。三个 correction primitive 分别覆盖：
 
 - dense prefill 的完整 `x @ A.T @ B.T`；
 - absorbed query 的 `q_nope @ B_K @ A`；
@@ -95,19 +92,6 @@ attention 路径分别接入 decode、dense new-token prefill、chunked context�
 context 和 mixed MQA/MHA。`kv_b_proj` 在 fully-sharded LoRA 下强制复制 A，B 仍按
 TP shard，避免 absorbed correction 跨 rank 缺片。无 active LoRA 时使用 CPU flag
 提前返回，不启动 correction kernel。
-
-复用审计先检查了 vLLM 的 `lora_shrink/lora_expand`、底层 BGMV/mm kernel、CPU/XPU
-reference 和 fused-MoE LoRA。现有 CUDA shrink/expand 依赖提前排序好的
-`LoRAKernelMeta` 与连续 LoRA matrix；MLA mapping 在 attention 内按 new/context token
-切片，`B_K/B_V` 又是带 head stride 的非连续 view。在 CUDA Graph forward 内重新
-sort/unique 并构造 metadata 不安全，因此不能直接套用。
-
-同时对照了 [SGLang PR #25001](https://github.com/sgl-project/sglang/pull/25001)
-和最新 `kv_b_lora_absorbed.py`：SGLang 也为该问题保留独立的 absorbed-MLA
-head-aware 计算，但使用四个 kernel 以及自身 segment/permutation/rank metadata。
-本修复复用了“按 LoRA factor 边界分两步、使用 logical head view、不物化 B@A”
-的设计结论，没有迁移不兼容的后端路由层；vLLM 侧由一个 212 行通用 primitive
-服务三条路径，`mla_kv_b_lora.py` 收敛为 88 行 adapter。
 
 ### Exact v0.25.1 验证 backport
 
@@ -153,23 +137,13 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 | patched long prompt/prefix cache | `prompt-repeat=32`，通过 lifecycle、routing 与 oracle | `48c3de083b4c4c4ab8e96c9b33f4ccb9c4203dd95d3cbade1582896ebfeb3993` |
 | patched TP2 fully-sharded + FULL/PIECEWISE graph | lifecycle、mixed routing、reload 与 merged oracle 全部通过；A effect 0.97337，A→B 1.26289，reload 0 | `66dc9151d0259a6f36b16d74402e27f85b1f4e527ba663972c16347dce9373a0` |
 
-最终 reuse refactor 后又按同一合同重跑：H200-0 BF16 kernel smoke SHA256 为
-`277566069e9921d5dd2da68e1229784e4891d7d4ce763f1368920f14fa7a8c00`；H200-1
-TP2 fully-sharded graph lifecycle SHA256 为
-`bbe86ec589e997814d6141e71c883485a73e5f3625bfdb1140c1299f786ad582`；merged
-oracle 结果 SHA256 为
-`3e1c57731a12602cd5a54a7cd94137d5a6605eba62a58a23065f091c8a301c9c`。
-所有 check 为 true，数值仍为 A effect `0.9733700752`、A→B `1.2628855705`、
-reload `0`，与 refactor 前一致。原始证据在
-`agent_run/results/mla-kv-b-lora-reuse-20260718/`。
-
 原始 JSON 都在上面的 fixture 目录。独立 Triton kernel smoke 覆盖 BF16 的 full
 linear、absorbed query 和 absorbed value correction，结果为 PASS。
 
 正式验证也已完成：
 
 - upstream main focused CUDA pytest：3 passed（BF16、FP16、fully-sharded wrapper）；
-- 8 个改动文件的完整 pre-commit 全部通过，包含 ruff、mypy、SPDX、
+- 7 个改动文件的完整 pre-commit 全部通过，包含 ruff、mypy、SPDX、
   forbidden-import 与 CUDA API 检查；
 - `git diff --check` 通过；
 - no-active-LoRA 单测以 active mapping 调用三个 public op，CPU flag 提前返回后
@@ -187,7 +161,6 @@ git -C <main-worktree> status --short
 git -C <main-worktree> diff --check
 uvx ruff check \
   vllm/lora/ops/triton_ops/mla_kv_b_lora.py \
-  vllm/lora/ops/triton_ops/routed_lora_matmul.py \
   vllm/lora/layers/column_parallel_linear.py \
   vllm/lora/model_manager.py \
   vllm/lora/ops/triton_ops/__init__.py \
