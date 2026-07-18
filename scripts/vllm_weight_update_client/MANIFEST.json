@@ -15,8 +15,9 @@
     "nvfp4_source": "reference/verl/verl/utils/qat/quantizer.py"
   },
   "files": {
-    "HANDOFF_ZH.md": "2c3039e0fd5e8cbb9d2af85f752dd530b108145242b23b1f32fad8e2c1e78252",
-    "README_ZH.md": "05d5d6755f3d985f49e45de1d3a706767eca23d944a8fd0d0331bb0ab13fd4a8",
+    "HANDOFF_ZH.md": "42129bc70dc43046eb2b0e9c559b6f4645d4ff0e00bace97fbdd40f3221efd38",
+    "MODELA_GB200_HANDOFF_ZH.md": "656d448abff91a854659f161ec90b824af456e8b1cfa6f9b61c2e6be081867c3",
+    "README_ZH.md": "d05109ee5946435b5377f0e4ecf22d938525f18abd38e27fe4906510939264cb",
     "convert_hf_to_nvfp4_vime.py": "dc941dcdce6105aa3ff544000f49ddf506e3bbbfdeb3b875ec510436161a3fcf",
     "hf_checkpoint_nccl_publisher.py": "7740e79b84ec6c9b810f59be48081ca54e470be40d756ddff8629d72bc870c9b",
     "patches/vllm-weight-transfer-client-runtime.patch": "b6add218758b4d898584c7e2ebf02e9581b3aa224a7632e7b7dc12fb6f6426a8",

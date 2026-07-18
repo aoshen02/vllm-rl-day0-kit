@@ -21,6 +21,7 @@ rollout 路径一致的在线量化，再通过 vLLM 原生 NCCL weight-transfer
 | `vime_quantization/` | 从 Vime/verl 复制并最小适配的 FP8、INT4、NVFP4 量化逻辑 |
 | `patches/vllm-weight-transfer-client-runtime.patch` | ModelA 镜像基线可用的单一 vLLM runtime patch |
 | `validation/` | 已完成的 parity 与端到端验收摘要 |
+| `MODELA_GB200_HANDOFF_ZH.md` | ModelA ModelOpt NVFP4 的 GB200 续跑设计、固定版本和验收合同 |
 
 ## 支持的发送模式
 
@@ -135,5 +136,9 @@ source 并在线量化。
 
 尚未由这个 client 包验收：多机、PP、IPC backend、LoRA、MTP draft 独立更新。
 这些不能从已有结果外推为通过。
+
+此外，现有 `fp4` 模式是 compressed-tensors W4A16，不支持 ModelA-NVFP4 的
+ModelOpt W4A4 expert schema。ModelA 的后续实现与 GB200 执行顺序见
+`MODELA_GB200_HANDOFF_ZH.md`。
 
 完整交接状态见 `HANDOFF_ZH.md`，测试证据见 `validation/RESULTS_ZH.md`。
