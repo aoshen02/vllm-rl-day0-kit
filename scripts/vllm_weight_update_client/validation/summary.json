@@ -1,0 +1,73 @@
+{
+  "schema": "vllm-agent-infra.weight_update_client_validation.v1",
+  "image": {
+    "name": "vllm/vllm-openai:modela",
+    "digest": "sha256:47424676a1df57387a278b32cf6de787b4f9d48541590fecf279c2906a224a61",
+    "vllm_commit": "93d5b21878762f83ae7c46349afe825b3075ea03",
+    "vllm_version": "0.1.dev18898+g93d5b2187"
+  },
+  "transport": {
+    "backend": "nccl",
+    "packed": true,
+    "packed_buffer_size_bytes": 1073741824,
+    "packed_num_buffers": 2
+  },
+  "tests": [
+    {
+      "mode": "fp8",
+      "model": "Qwen3-30B-A3B",
+      "topology": "TP2+EP",
+      "parity": {
+        "passed": true,
+        "schema_output_count": 37491,
+        "vime_sample_byte_equal": true,
+        "artifact_sha256": "1288b71cedd75fb7a2aff4cb3ee262b157b058f089d4978b355111c295235f39"
+      },
+      "e2e": {
+        "passed": true,
+        "canonical_warmup_updates": 1,
+        "identity_updates": 2,
+        "all_bitwise_equal": true,
+        "max_abs_logprob_diff": 0,
+        "artifact_sha256": "313df043af76b9af31def8ab8a30de9498d724cc1e761678dc2da2d44584b2da"
+      }
+    },
+    {
+      "mode": "int4",
+      "model": "Qwen3-4B",
+      "topology": "TP1 dense",
+      "parity": {
+        "passed": true,
+        "vime_sample_byte_equal": true,
+        "artifact_sha256": "c202fe949b684c3a7f616dff1aa0b8596471963500415127362729600d064b2d"
+      },
+      "e2e": {
+        "passed": true,
+        "canonical_warmup_updates": 1,
+        "identity_updates": 2,
+        "all_bitwise_equal": true,
+        "max_abs_logprob_diff": 0,
+        "artifact_sha256": "88a5df98b40314cc5b5ae602f4e5997272b1719774f6a794eb0b684679f41db9"
+      }
+    },
+    {
+      "mode": "fp4",
+      "model": "Qwen3-4B",
+      "topology": "TP1 dense, Marlin NVFP4",
+      "parity": {
+        "passed": true,
+        "full_checkpoint_compared_tensors": 902,
+        "full_checkpoint_equal_tensors": 902,
+        "artifact_sha256": "65c24e39c6c274a4fdc6063076ec70bc02efe6ec259b3f1cde18070343657c53"
+      },
+      "e2e": {
+        "passed": true,
+        "canonical_warmup_updates": 1,
+        "identity_updates": 2,
+        "all_bitwise_equal": true,
+        "max_abs_logprob_diff": 0,
+        "artifact_sha256": "92f4528f150d5e7171e414caa4768aeb4f4975381cbb7cafc75cabf04d3d595b"
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "vllm-agent-infra.weight_update_client_manifest.v1",
+  "created_at": "2026-07-18T01:10:00Z",
+  "vllm_runtime": {
+    "image": "vllm/vllm-openai:modela",
+    "image_digest": "sha256:47424676a1df57387a278b32cf6de787b4f9d48541590fecf279c2906a224a61",
+    "version": "0.1.dev18898+g93d5b2187",
+    "base_commit": "93d5b21878762f83ae7c46349afe825b3075ea03",
+    "upstream_pr": "https://github.com/vllm-project/vllm/pull/47357",
+    "cli_followup": "https://github.com/vllm-project/vllm/pull/47357#issuecomment-5009026819"
+  },
+  "vime_source": {
+    "commit": "f2755327540d806e561f013068d3bd29d8559f8d",
+    "fp8_int4_root": "vime/backends/megatron_utils",
+    "nvfp4_source": "reference/verl/verl/utils/qat/quantizer.py"
+  },
+  "files": {
+    "HANDOFF_ZH.md": "2c3039e0fd5e8cbb9d2af85f752dd530b108145242b23b1f32fad8e2c1e78252",
+    "README_ZH.md": "05d5d6755f3d985f49e45de1d3a706767eca23d944a8fd0d0331bb0ab13fd4a8",
+    "convert_hf_to_nvfp4_vime.py": "dc941dcdce6105aa3ff544000f49ddf506e3bbbfdeb3b875ec510436161a3fcf",
+    "hf_checkpoint_nccl_publisher.py": "7740e79b84ec6c9b810f59be48081ca54e470be40d756ddff8629d72bc870c9b",
+    "patches/vllm-weight-transfer-client-runtime.patch": "b6add218758b4d898584c7e2ebf02e9581b3aa224a7632e7b7dc12fb6f6426a8",
+    "run_vllm_wu1_e2e.py": "ec711e6d9cf1943c2f7fa2b7d13eb692b08f89e44c9e7cd89992b0d5f16d6ee1",
+    "sync_vllm_python_patch.py": "d3b4d87e41d35e18c28283e12c42498daa88a6a20968a2865b932e77e9ce8b2b",
+    "validation/RESULTS_ZH.md": "4ad209856eb12344fa38848bbc8b93949665a7e8b545c24daaba7b94c4a63247",
+    "validation/summary.json": "5774d151260e6b88a1aa3d2c38d5be49e0b0c76449fb731e6f3fe882daec982c",
+    "verify_vime_quantization_parity.py": "a482f358b168fec72b6929639c4c444d2c5d56fab64c92216c47b408c9a24bd1",
+    "vime_quantization/__init__.py": "fcb61463f3d82036bf046a427a73e523e5710c51c442fee5808aadd773687a3e",
+    "vime_quantization/fp8_helpers.py": "270013ba370a6d36cc4c6663f66218d631056a177ca8950dddf64834abe9e808",
+    "vime_quantization/fp8_kernel.py": "0c3f8121d9423de9b5109c9015f1b5e4bb0622574fa00b38c267e900ac4bd487",
+    "vime_quantization/int4_qat/__init__.py": "45a38aa2882ae5e167fee3be08e7e3a241a572ebb8892a3e80290c6ff2adedc6",
+    "vime_quantization/int4_qat/fake_int4_quant_cuda.cu": "91764d454b025c256a95b18d392bdba27817b6972b15b6a0b2f141d34899720b",
+    "vime_quantization/int4_qat/setup.py": "f8a9389797532d24701698e96222ca35d6a81236fe02a4a0dbcc04515614cde6",
+    "vime_quantization/quantizer_compressed_tensors.py": "4943e4bb0acb8678fc219aed4307261f9dfdbd8d318cf5db28ffe12ab4ae9f48",
+    "vime_quantization/quantizer_fp8.py": "0335e2344c44d026487d6c8c8da2c97bb1f8186f3aaa6101e41bf1087ce6f6cc",
+    "vime_quantization/quantizer_nvfp4.py": "2ef0470c61f14d875dbb08ee0f69dd91fb1c9d063e707bd923b1ee038b48caf4"
+  }
+}
