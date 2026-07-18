@@ -32,3 +32,27 @@ FP8 的独立在线量化 bytes 与 Vime 完全一致，但不要求等于另一
 | NVFP4 E2E | `92f4528f150d5e7171e414caa4768aeb4f4975381cbb7cafc75cabf04d3d595b` |
 
 结构化摘要见 `summary.json`。
+
+## MLA `kv_b_proj` LoRA 修复证据
+
+这组测试使用 `vllm/vllm-openai:v0.25.1`（digest
+`sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089`，
+commit `752a3a504485790a2e8491cacbb35c137339ad34`）和
+Moonlight-16B-A3B-Instruct。它验证磁盘 adapter 的动态 load/in-place replace，
+不经过 full-weight NCCL sender。
+
+| Lane | 结果 |
+|---|---|
+| stock TP1 eager | 预期失败：load endpoint 成功，但 base→A 与 A→B fixed-token logprob diff 均为 0 |
+| patched TP1 eager | lifecycle 与 merged-weight oracle 通过 |
+| patched FULL/PIECEWISE graph | lifecycle、mixed-batch routing 与同 execution mode merged oracle 通过 |
+| patched TP2 eager | lifecycle、mixed-batch routing 与 merged oracle 通过 |
+| patched long prompt/prefix cache | `prompt-repeat=32`，lifecycle、routing 与 merged oracle 通过 |
+| patched TP2 fully-sharded + FULL/PIECEWISE graph | lifecycle、mixed routing、A→B→A reload 与 merged oracle 通过 |
+| upstream main focused pytest | 3 passed（BF16、FP16、fully-sharded wrapper） |
+| upstream main pre-commit | 7 个改动文件全部 hooks 通过 |
+
+这些两台 H200 的证据足够覆盖 issue 的关键软件正确性，不要求 GB200。修复已提交
+为 [vLLM draft PR #49007](https://github.com/vllm-project/vllm/pull/49007)。DCP>1
+没有 E2E 覆盖；精确 hash、worktree 与复现命令见
+`../MLA_KV_B_LORA_VALIDATION_ZH.md`。

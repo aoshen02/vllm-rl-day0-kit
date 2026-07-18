@@ -69,5 +69,81 @@
         "artifact_sha256": "92f4528f150d5e7171e414caa4768aeb4f4975381cbb7cafc75cabf04d3d595b"
       }
     }
-  ]
+  ],
+  "lora_update": {
+    "status": "fixed_validated_draft_pr_open",
+    "issue": "https://github.com/vllm-project/vllm/issues/48974",
+    "draft_pr": "https://github.com/vllm-project/vllm/pull/49007",
+    "upstream_commit": "9275633c73",
+    "image": {
+      "name": "vllm/vllm-openai:v0.25.1",
+      "digest": "sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089",
+      "vllm_commit": "752a3a504485790a2e8491cacbb35c137339ad34"
+    },
+    "model": "Moonlight-16B-A3B-Instruct",
+    "target_module": "model.layers.0.self_attn.kv_b_proj",
+    "transport": "server-visible disk adapter through dynamic LoRA REST API",
+    "h200_evidence": [
+      {
+        "lane": "stock_tp1_eager",
+        "passed": false,
+        "expected_failure_reproduced": true,
+        "base_to_adapter_a": 0,
+        "adapter_a_to_b": 0,
+        "artifact_sha256": "e6c99b951e214fb90f55c25ab90b5af68838197105ab90145d34e7382c5d1151"
+      },
+      {
+        "lane": "patched_tp1_eager_merged_oracle",
+        "passed": true,
+        "adapter_a_reload_identity": 0,
+        "same_generated_tokens_as_merged": true,
+        "artifact_sha256": "8d6b484ac4ff7057fd35fedca85d39302e3cabb555aacf77ea400c7e301401f1"
+      },
+      {
+        "lane": "patched_full_piecewise_graph_mixed_merged_oracle",
+        "passed": true,
+        "mixed_batch_routing": true,
+        "adapter_a_reload_identity": 0,
+        "same_generated_tokens_as_merged": true,
+        "artifact_sha256": "e4daa02c0dc8143a5cb4a9b0bb1d7b0c5744374527d5e6e96a06395701620c8b"
+      },
+      {
+        "lane": "patched_tp2_eager_mixed_merged_oracle",
+        "passed": true,
+        "mixed_batch_routing": true,
+        "adapter_a_reload_identity": 0,
+        "same_generated_tokens_as_merged": true,
+        "artifact_sha256": "3792aa6156b14eb786f4794cf3431b10a578d3ab498c5a658650706fc132541c"
+      },
+      {
+        "lane": "patched_long_prompt_prefix_cache",
+        "passed": true,
+        "prompt_repeat": 32,
+        "mixed_batch_routing": true,
+        "adapter_a_reload_identity": 0,
+        "artifact_sha256": "48c3de083b4c4c4ab8e96c9b33f4ccb9c4203dd95d3cbade1582896ebfeb3993"
+      },
+      {
+        "lane": "patched_tp2_fully_sharded_full_piecewise_graph_merged_oracle",
+        "passed": true,
+        "base_to_adapter_a": 0.9733700752258301,
+        "adapter_a_to_b": 1.262885570526123,
+        "adapter_a_reload_identity": 0,
+        "mixed_batch_routing": true,
+        "same_generated_tokens_as_merged": true,
+        "merged_oracle_relative_l2_ratio": 0.2163020049327087,
+        "artifact_sha256": "66dc9151d0259a6f36b16d74402e27f85b1f4e527ba663972c16347dce9373a0"
+      }
+    ],
+    "focused_validation": {
+      "pytest": "3 passed",
+      "pre_commit": "all hooks passed for 7 changed files",
+      "diff_check": "passed",
+      "no_lora_fast_path": "CPU flag early-exit leaves all correction outputs unchanged"
+    },
+    "limitations": [
+      "DCP world size greater than 1 was code-reviewed and type-checked but not exercised end-to-end",
+      "No standalone latency benchmark is claimed"
+    ]
+  }
 }

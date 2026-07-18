@@ -15,6 +15,7 @@ rollout 路径一致的在线量化，再通过 vLLM 原生 NCCL weight-transfer
 |---|---|
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、在线量化 source、stateful NCCL publisher |
 | `run_vllm_wu1_e2e.py` | HTTP 控制面、更新前后 oracle 和 WU-1 判定 |
+| `run_vllm_lora_update_e2e.py` | 动态 LoRA 磁盘加载、in-place 替换、mixed-batch 与 merged-weight oracle |
 | `verify_vime_quantization_parity.py` | 独立量化实现与 Vime/目标 schema 的 parity 检查 |
 | `convert_hf_to_nvfp4_vime.py` | 生成 NVFP4 rollout 初始化/schema checkpoint |
 | `sync_vllm_python_patch.py` | 把 exact-base vLLM Python patch 安全复制到未启动容器 |
@@ -22,6 +23,7 @@ rollout 路径一致的在线量化，再通过 vLLM 原生 NCCL weight-transfer
 | `patches/vllm-weight-transfer-client-runtime.patch` | ModelA 镜像基线可用的单一 vLLM runtime patch |
 | `validation/` | 已完成的 parity 与端到端验收摘要 |
 | `MODELA_GB200_HANDOFF_ZH.md` | ModelA ModelOpt NVFP4 的 GB200 续跑设计、固定版本和验收合同 |
+| `MLA_KV_B_LORA_VALIDATION_ZH.md` | issue #48974 的根因、修复、双 H200 证据与 draft PR |
 
 ## 支持的发送模式
 
@@ -126,6 +128,38 @@ python convert_hf_to_nvfp4_vime.py \
 这个转换产物用于启动 vLLM 和定义发送 schema；每轮实际发送仍重新读取 BF16
 source 并在线量化。
 
+## LoRA 磁盘热替换
+
+LoRA update 与 full-weight update 是两条独立链路。vLLM 已提供动态 adapter
+加载 API，因此 LoRA 不需要复用 NCCL weight-transfer engine，也不需要模拟训练端
+发送 tensor。客户端通过 `/v1/load_lora_adapter` 从服务端可见的磁盘路径加载
+adapter，并用 `load_inplace=true` 原位替换同名 adapter：
+
+```bash
+VLLM_ALLOW_RUNTIME_LORA_UPDATING=True vllm serve <base-model> \
+  --enable-lora \
+  --served-model-name <base-name>
+
+<venv-python> run_vllm_lora_update_e2e.py \
+  --base-url http://<server-host>:8000 \
+  --base-model <base-name> \
+  --lora-name <adapter-name> \
+  --adapter-a <server-visible-positive-adapter> \
+  --adapter-b <server-visible-negative-adapter> \
+  --oracle-base-url http://<merged-oracle-host>:8001 \
+  --oracle-model <merged-model-name> \
+  --output <result-dir>/result.json
+```
+
+验收不以 HTTP 200 或“能加载”为通过条件。客户端检查 base 不变、首次 adapter
+产生可观测 effect、A→B 原位替换产生不同 effect、B→A 重载 bitwise 一致、prefix
+cache 稳定、base/adapter 并发 mixed-batch 路由正确，并可与把 A 合并进 BF16 base
+得到的独立 checkpoint 比较 fixed-token logprob 和 generated tokens。adapter 路径
+由服务端进程读取，不能由客户端提前解析成本机路径。
+
+MLA `kv_b_proj` 的修复状态、exact image、fixture、双 H200 证据和 draft PR 见
+`MLA_KV_B_LORA_VALIDATION_ZH.md`。
+
 ## 已验证边界
 
 - NCCL packed transfer。
@@ -134,8 +168,11 @@ source 并在线量化。
 - FULL/PIECEWISE CUDA Graph、prefix cache、batch size 1/2。
 - canonical warm-up update + 两次同权重更新。
 
-尚未由这个 client 包验收：多机、PP、IPC backend、LoRA、MTP draft 独立更新。
-这些不能从已有结果外推为通过。
+尚未由 full-weight client 验收：多机、PP、IPC backend、MTP draft 独立更新。
+LoRA 使用上面的独立磁盘热替换 harness；MLA `kv_b_proj` 已在两台 H200 上完成
+TP2 fully-sharded、FULL/PIECEWISE CUDA Graph、mixed routing、merged oracle 和
+upstream focused pytest，不要求 GB200 才能验证该软件修复。DCP>1 未做 E2E，不能
+从现有结果外推为通过。
 
 此外，现有 `fp4` 模式是 compressed-tensors W4A16，不支持 ModelA-NVFP4 的
 ModelOpt W4A4 expert schema。ModelA 的后续实现与 GB200 执行顺序见

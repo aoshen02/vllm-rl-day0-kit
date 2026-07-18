@@ -1,6 +1,7 @@
 {
   "schema": "vllm-agent-infra.weight_update_client_manifest.v1",
   "created_at": "2026-07-18T01:10:00Z",
+  "updated_at": "2026-07-18T03:38:00Z",
   "vllm_runtime": {
     "image": "vllm/vllm-openai:modela",
     "image_digest": "sha256:47424676a1df57387a278b32cf6de787b4f9d48541590fecf279c2906a224a61",
@@ -9,22 +10,34 @@
     "upstream_pr": "https://github.com/vllm-project/vllm/pull/47357",
     "cli_followup": "https://github.com/vllm-project/vllm/pull/47357#issuecomment-5009026819"
   },
+  "lora_validation_runtime": {
+    "issue": "https://github.com/vllm-project/vllm/issues/48974",
+    "image": "vllm/vllm-openai:v0.25.1",
+    "image_digest": "sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089",
+    "base_commit": "752a3a504485790a2e8491cacbb35c137339ad34",
+    "model": "Moonlight-16B-A3B-Instruct",
+    "status": "fixed_validated_draft_pr_open",
+    "draft_pr": "https://github.com/vllm-project/vllm/pull/49007",
+    "upstream_commit": "9275633c73"
+  },
   "vime_source": {
     "commit": "f2755327540d806e561f013068d3bd29d8559f8d",
     "fp8_int4_root": "vime/backends/megatron_utils",
     "nvfp4_source": "reference/verl/verl/utils/qat/quantizer.py"
   },
   "files": {
-    "HANDOFF_ZH.md": "42129bc70dc43046eb2b0e9c559b6f4645d4ff0e00bace97fbdd40f3221efd38",
+    "HANDOFF_ZH.md": "3ad0825d619e1862f12b0c4aeaac98b286a6f52ed0d1559d17ca0e6a7e7c985b",
     "MODELA_GB200_HANDOFF_ZH.md": "656d448abff91a854659f161ec90b824af456e8b1cfa6f9b61c2e6be081867c3",
-    "README_ZH.md": "d05109ee5946435b5377f0e4ecf22d938525f18abd38e27fe4906510939264cb",
+    "MLA_KV_B_LORA_VALIDATION_ZH.md": "2d6299e8dd7a6a54d9c24b270618b023e4c03134bd91c30d32da1c4c0ac1ec8b",
+    "README_ZH.md": "00bcd11b180f331a6ce35dcfb05abfb0e24e74c74449969ff18f6079ab5100ec",
     "convert_hf_to_nvfp4_vime.py": "dc941dcdce6105aa3ff544000f49ddf506e3bbbfdeb3b875ec510436161a3fcf",
     "hf_checkpoint_nccl_publisher.py": "7740e79b84ec6c9b810f59be48081ca54e470be40d756ddff8629d72bc870c9b",
     "patches/vllm-weight-transfer-client-runtime.patch": "b6add218758b4d898584c7e2ebf02e9581b3aa224a7632e7b7dc12fb6f6426a8",
+    "run_vllm_lora_update_e2e.py": "05db12e0a8671dfe583fd272ab8f851f6be410ed5cfd66f9f480d57c5a71df46",
     "run_vllm_wu1_e2e.py": "ec711e6d9cf1943c2f7fa2b7d13eb692b08f89e44c9e7cd89992b0d5f16d6ee1",
     "sync_vllm_python_patch.py": "d3b4d87e41d35e18c28283e12c42498daa88a6a20968a2865b932e77e9ce8b2b",
-    "validation/RESULTS_ZH.md": "4ad209856eb12344fa38848bbc8b93949665a7e8b545c24daaba7b94c4a63247",
-    "validation/summary.json": "5774d151260e6b88a1aa3d2c38d5be49e0b0c76449fb731e6f3fe882daec982c",
+    "validation/RESULTS_ZH.md": "595782ce96179c7eefd8c7d1279a8e925c6a2865f0a11e39ecdb1504c9a07f79",
+    "validation/summary.json": "d6785edc3211feb35ced6068bef7e9205b7b1084600d781907f24fee2a10d37e",
     "verify_vime_quantization_parity.py": "a482f358b168fec72b6929639c4c444d2c5d56fab64c92216c47b408c9a24bd1",
     "vime_quantization/__init__.py": "fcb61463f3d82036bf046a427a73e523e5710c51c442fee5808aadd773687a3e",
     "vime_quantization/fp8_helpers.py": "270013ba370a6d36cc4c6663f66218d631056a177ca8950dddf64834abe9e808",
