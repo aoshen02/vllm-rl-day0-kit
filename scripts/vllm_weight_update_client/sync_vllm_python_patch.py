@@ -1,9 +1,9 @@
-"""Copy an exact-base vLLM Python patch into a stopped Docker container.
+"""Copy a verified vLLM Python patch into a stopped Docker container.
 
-The container image and host worktree must resolve to the same vLLM commit.
-Only dirty ``vllm/**/*.py`` files are accepted. Before any overwrite, every
-container file is compared with the worktree's ``HEAD`` version; after copying,
-it is compared with the dirty host file.
+Normally the container image and host worktree must resolve to the same vLLM
+commit. A package snapshot exported from the exact image is also accepted when
+its complete Python tree and provenance manifest match the image. Only dirty
+``vllm/**/*.py`` files are copied, one at a time.
 """
 
 from __future__ import annotations
@@ -19,19 +19,31 @@ from typing import Any
 
 
 IMAGE_PROBE = """
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import vllm
 from vllm import _version
 
 package_root = Path(vllm.__file__).resolve().parent
+python_files = sorted(package_root.rglob("*.py"))
+tree_hash = hashlib.sha256()
+for path in python_files:
+    relative = PurePosixPath("vllm", *path.relative_to(package_root).parts)
+    file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    tree_hash.update(f"{file_hash}  {relative.as_posix()}\\n".encode())
 print(json.dumps({
     "version": vllm.__version__,
     "commit_id": _version.__commit_id__,
     "package_root": str(package_root),
+    "python_file_count": len(python_files),
+    "python_tree_sha256": tree_hash.hexdigest(),
 }, sort_keys=True))
 """
+
+IMAGE_BASELINE_FILE = ".vllm-image-baseline.json"
+IMAGE_BASELINE_SCHEMA = "vllm-agent-infra.image_python_baseline.v1"
 
 
 def _run(
@@ -135,6 +147,72 @@ def _head_file(worktree: Path, path: PurePosixPath) -> bytes | None:
     ).stdout
 
 
+def _head_python_tree(worktree: Path) -> tuple[int, str]:
+    paths = sorted(
+        PurePosixPath(path)
+        for path in _git_output(
+            worktree,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "--",
+            "vllm",
+        ).splitlines()
+        if path.endswith(".py")
+    )
+    tree_hash = hashlib.sha256()
+    for path in paths:
+        data = _head_file(worktree, path)
+        if data is None:
+            raise RuntimeError(f"HEAD file disappeared while hashing: {path}")
+        file_hash = _sha256(data)
+        tree_hash.update(f"{file_hash}  {path.as_posix()}\n".encode())
+    return len(paths), tree_hash.hexdigest()
+
+
+def _validate_image_python_baseline(
+    worktree: Path,
+    image_info: dict[str, Any],
+    image_probe: dict[str, Any],
+) -> dict[str, Any]:
+    path = worktree / IMAGE_BASELINE_FILE
+    if not path.is_file():
+        raise RuntimeError(f"Image Python baseline manifest is absent: {path}")
+    baseline = json.loads(path.read_text())
+    if baseline.get("schema") != IMAGE_BASELINE_SCHEMA:
+        raise RuntimeError(f"Unexpected image baseline schema: {baseline.get('schema')}")
+
+    expected = {
+        "image_id": image_info["Id"],
+        "vllm_version": image_probe["version"],
+        "vllm_commit": image_probe["commit_id"],
+        "package_root": image_probe["package_root"],
+        "python_file_count": image_probe["python_file_count"],
+        "python_tree_sha256": image_probe["python_tree_sha256"],
+    }
+    mismatches = {
+        key: {"manifest": baseline.get(key), "image": value}
+        for key, value in expected.items()
+        if baseline.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"Image Python baseline provenance mismatch: {mismatches}")
+
+    head_count, head_hash = _head_python_tree(worktree)
+    if head_count != baseline["python_file_count"]:
+        raise RuntimeError(
+            "Image Python baseline file count mismatch: "
+            f"HEAD={head_count}, manifest={baseline['python_file_count']}"
+        )
+    if head_hash != baseline["python_tree_sha256"]:
+        raise RuntimeError(
+            "Image Python baseline tree hash mismatch: "
+            f"HEAD={head_hash}, manifest={baseline['python_tree_sha256']}"
+        )
+    return baseline
+
+
 def _copy_from_container(
     container: str,
     source: PurePosixPath,
@@ -174,6 +252,14 @@ def main() -> None:
     )
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--image-python-baseline",
+        action="store_true",
+        help=(
+            "Accept a Git baseline exported from the exact image after checking "
+            "its complete vllm/**/*.py tree and provenance manifest"
+        ),
+    )
     args = parser.parse_args()
 
     worktree = args.worktree.resolve()
@@ -203,7 +289,16 @@ def main() -> None:
     image_probe = _probe_image(args.image)
     head = _git_output(worktree, "rev-parse", "HEAD")
     image_commit = image_probe["commit_id"].removeprefix("g")
-    if not head.startswith(image_commit):
+    baseline_mode = "exact_commit"
+    baseline_info = None
+    if args.image_python_baseline:
+        baseline_info = _validate_image_python_baseline(
+            worktree,
+            image_info,
+            image_probe,
+        )
+        baseline_mode = "image_python_snapshot"
+    elif not head.startswith(image_commit):
         raise RuntimeError(f"Worktree HEAD {head} does not match image commit {image_commit}")
 
     package_root = PurePosixPath(image_probe["package_root"])
@@ -269,8 +364,12 @@ def main() -> None:
         "image_repo_digests": image_info.get("RepoDigests", []),
         "image_vllm_version": image_probe["version"],
         "image_vllm_commit": image_probe["commit_id"],
+        "image_python_file_count": image_probe["python_file_count"],
+        "image_python_tree_sha256": image_probe["python_tree_sha256"],
         "worktree": str(worktree),
         "worktree_head": head,
+        "baseline_mode": baseline_mode,
+        "baseline_manifest": baseline_info,
         "container": args.container,
         "container_initial_state": status,
         "files": records,

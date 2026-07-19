@@ -96,6 +96,18 @@ Docker 使用 `--gpus all` 暴露一致的设备节点，再通过容器内
 
 ## WU-1 运行模板
 
+### Vime 生命周期（WU-1）
+
+客户端的 identity update 必须走与 Vime rollout 相同的生命周期，而不是只调用
+weight-transfer endpoint：`abort/drain → reset_prefix_cache(false) → sleep(level=2)
+→ wake_up(tags=weights) → pause(mode=keep, clear_cache=false) → reset_prefix_cache(false)
+→ start/stream/finish weight update → resume → wake_up(tags=kv_cache)`；其中
+`cuda_graph` 保留在 requested tags 证据中，但与当前 Vime adapter 一样不转发给
+原生 endpoint。
+客户端是 update 的发起方；每个阶段的 HTTP 响应、sleep 状态和耗时都会写入结果中的
+`lifecycle` trace。若服务端没有返回实际生效的 tag 集合，结果必须明确标记为“requested
+tags only”，不能把请求参数当作已验证的 effective tags。
+
 以下命令在 client 容器中执行。`--device cuda:0` 指 client 容器可见设备中的
 第一个 GPU，不是宿主物理编号。
 

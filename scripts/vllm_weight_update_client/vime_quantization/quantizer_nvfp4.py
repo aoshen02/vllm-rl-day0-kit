@@ -54,7 +54,6 @@ from compressed_tensors.quantization.quant_args import (
 )
 from compressed_tensors.quantization.utils.helpers import generate_gparam
 
-
 _LAYER_IDX_RE = re.compile(r"layers\.(\d+)\.")
 FUSE_PATTERNS = {
     "qkv": ["q_proj", "k_proj", "v_proj"],
@@ -225,27 +224,10 @@ class QATQuantizer:
         results: list[tuple[str, torch.Tensor]] = []
         for layer_name, weight_gpu in weights_on_gpu.items():
             fused_global_scale = fused_global_scales[layer_name]
-            weight_scale = compute_blockwise_scale(
+            weight_packed, weight_scale, _ = self.quantize_weight(
                 weight_gpu,
-                fused_global_scale,
-                self.group_size,
+                global_scale=fused_global_scale,
             )
-            if self._compressor is not None:
-                weight_packed = self._compressor.compress_weight(
-                    weight=weight_gpu,
-                    scale=weight_scale.float(),
-                    global_scale=fused_global_scale,
-                    quantization_args=self._quant_args,
-                )["weight_packed"]
-            else:
-                quantized_weight = quantize(
-                    x=weight_gpu,
-                    scale=weight_scale.float(),
-                    global_scale=fused_global_scale,
-                    zero_point=None,
-                    args=self._quant_args,
-                )
-                weight_packed = _pack_fp4_to_uint8(quantized_weight)
             results.extend(
                 [
                     (f"{layer_name}.weight_packed", weight_packed.to(output_device)),
@@ -273,6 +255,52 @@ class QATQuantizer:
         for name, tensor in layer_passthrough.items():
             results.append((name, tensor.to(output_device)))
         return results
+
+    def quantize_weight(
+        self,
+        weight: torch.Tensor,
+        *,
+        global_scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize one 2-D weight and return packed data, block scale, gparam."""
+        if weight.ndim != 2 or weight.shape[1] % self.group_size != 0:
+            raise ValueError(
+                "NVFP4 weight must be 2-D with an input dimension divisible "
+                f"by {self.group_size}, got {tuple(weight.shape)}"
+            )
+        if global_scale is None:
+            amax = torch.amax(torch.abs(weight)).to(torch.float32)
+            if not torch.isfinite(amax) or amax <= 0:
+                raise ValueError(f"NVFP4 weight has invalid amax {amax.item()}")
+            global_scale = generate_gparam(
+                -amax.unsqueeze(0),
+                amax.unsqueeze(0),
+                scale_data=FP8_E4M3_DATA,
+                quant_data=FP4_E2M1_DATA,
+                dtype=torch.float32,
+            )
+        weight_scale = compute_blockwise_scale(
+            weight,
+            global_scale,
+            self.group_size,
+        )
+        if self._compressor is not None:
+            weight_packed = self._compressor.compress_weight(
+                weight=weight,
+                scale=weight_scale.float(),
+                global_scale=global_scale,
+                quantization_args=self._quant_args,
+            )["weight_packed"]
+        else:
+            quantized_weight = quantize(
+                x=weight,
+                scale=weight_scale.float(),
+                global_scale=global_scale,
+                zero_point=None,
+                args=self._quant_args,
+            )
+            weight_packed = _pack_fp4_to_uint8(quantized_weight)
+        return weight_packed, weight_scale, global_scale
 
     def quantize_with_fusion(
         self,
