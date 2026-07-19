@@ -146,27 +146,7 @@ class CheckpointManifest:
     def iter_cuda_tensors(
         self, device: torch.device
     ) -> Iterator[tuple[str, torch.Tensor]]:
-        root = Path(self.checkpoint_path)
-        # Checkpoint order can interleave shards, so retain one handle per
-        # shard for the iteration rather than reopening a safetensors mmap for
-        # every tensor. get_tensor still materializes only the current tensor.
-        with ExitStack() as stack:
-            opened_files: dict[str, Any] = {}
-            for metadata in self.tensors:
-                opened_file = opened_files.get(metadata.file)
-                if opened_file is None:
-                    opened_file = stack.enter_context(
-                        safe_open(
-                            root / metadata.file,
-                            framework="pt",
-                            device="cpu",
-                        )
-                    )
-                    opened_files[metadata.file] = opened_file
-                cpu_tensor = opened_file.get_tensor(metadata.name)
-                cuda_tensor = cpu_tensor.to(device=device)
-                del cpu_tensor
-                yield metadata.name, cuda_tensor
+        return _CheckpointTensorIterator(self, device)
 
     def summary(self, buffer_size_bytes: int) -> dict[str, Any]:
         return {
@@ -199,6 +179,59 @@ class SafetensorsCheckpointSource(WeightSource):
 
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
         return self.manifest.iter_cuda_tensors(self.device)
+
+
+class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
+    """Stream checkpoint tensors while allowing bounded mmap lifetimes."""
+
+    def __init__(self, manifest: CheckpointManifest, device: torch.device) -> None:
+        self._root = Path(manifest.checkpoint_path)
+        self._metadata = iter(manifest.tensors)
+        self._device = device
+        self._stack = ExitStack()
+        self._opened_files: dict[str, Any] = {}
+        self._closed = False
+
+    def __iter__(self) -> _CheckpointTensorIterator:
+        return self
+
+    def __next__(self) -> tuple[str, torch.Tensor]:
+        if self._closed:
+            raise StopIteration
+        try:
+            metadata = next(self._metadata)
+        except StopIteration:
+            self.close_handles()
+            raise
+
+        opened_file = self._opened_files.get(metadata.file)
+        if opened_file is None:
+            opened_file = self._stack.enter_context(
+                safe_open(
+                    self._root / metadata.file,
+                    framework="pt",
+                    device="cpu",
+                )
+            )
+            self._opened_files[metadata.file] = opened_file
+        cpu_tensor = opened_file.get_tensor(metadata.name)
+        cuda_tensor = cpu_tensor.to(device=self._device)
+        del cpu_tensor
+        return metadata.name, cuda_tensor
+
+    def close_handles(self) -> None:
+        """Release file-backed mappings without resetting iteration state."""
+        if self._closed:
+            return
+        self._stack.close()
+        self._stack = ExitStack()
+        self._opened_files.clear()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.close_handles()
+        self._closed = True
 
 UpdateTarget = Literal["main", "draft"]
 
@@ -406,6 +439,9 @@ class NcclCheckpointPublisher:
                 sent_names.extend(name for name, _ in named_tensors)
                 sent_total_bytes += bucket.total_bytes
                 del named_tensors
+                close_handles = getattr(source_iter, "close_handles", None)
+                if close_handles is not None:
+                    close_handles()
 
             try:
                 extra_name, extra_tensor = next(source_iter)
@@ -434,6 +470,9 @@ class NcclCheckpointPublisher:
             update_failed = True
             raise
         finally:
+            close_iterator = getattr(source_iter, "close", None)
+            if close_iterator is not None:
+                close_iterator()
             if not update_failed:
                 self.engine.client.finish_weight_update()
         return bucket_results
