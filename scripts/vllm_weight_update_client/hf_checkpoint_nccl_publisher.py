@@ -147,19 +147,26 @@ class CheckpointManifest:
         self, device: torch.device
     ) -> Iterator[tuple[str, torch.Tensor]]:
         root = Path(self.checkpoint_path)
-        for metadata in self.tensors:
-            # The checkpoint order interleaves shards. Keep only the current
-            # safetensors mapping alive so reading a multi-terabyte checkpoint
-            # does not turn its private mmap pages into resident host memory.
-            with safe_open(
-                root / metadata.file,
-                framework="pt",
-                device="cpu",
-            ) as opened_file:
+        # Checkpoint order can interleave shards, so retain one handle per
+        # shard for the iteration rather than reopening a safetensors mmap for
+        # every tensor. get_tensor still materializes only the current tensor.
+        with ExitStack() as stack:
+            opened_files: dict[str, Any] = {}
+            for metadata in self.tensors:
+                opened_file = opened_files.get(metadata.file)
+                if opened_file is None:
+                    opened_file = stack.enter_context(
+                        safe_open(
+                            root / metadata.file,
+                            framework="pt",
+                            device="cpu",
+                        )
+                    )
+                    opened_files[metadata.file] = opened_file
                 cpu_tensor = opened_file.get_tensor(metadata.name)
                 cuda_tensor = cpu_tensor.to(device=device)
                 del cpu_tensor
-            yield metadata.name, cuda_tensor
+                yield metadata.name, cuda_tensor
 
     def summary(self, buffer_size_bytes: int) -> dict[str, Any]:
         return {
