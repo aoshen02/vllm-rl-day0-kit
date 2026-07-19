@@ -323,7 +323,9 @@ class NcclCheckpointPublisher:
     def _send_weights(self) -> list[dict[str, Any]]:
         """Send one update using the required non-expert/expert order."""
         assert self.engine is not None
-        group = self.engine.model_update_group
+        group = getattr(self.engine, "group", None)
+        if group is None:
+            group = getattr(self.engine, "model_update_group", None)
         if group is None:
             raise RuntimeError("NCCL publisher has no initialized trainer group")
 

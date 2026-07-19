@@ -4,10 +4,10 @@
 Hugging Face safetensors checkpoint，生成 canonical tensor manifest，并通过
 vLLM 原生 NCCL weight-transfer engine 发送给服务端。
 
-当前 active path 只有 `checkpoint_passthrough`。client 不做量化、请求、sleep、
-wake、KV/prefix-cache reset、LoRA 或 RL 生命周期控制；这些动作由调用方按实验
-合同负责。MTP 只有显式传入 `--enable-mtp` 才会执行第二个独立 draft update。
-禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoint。
+当前 active path 只有 `checkpoint_passthrough`。publisher 不做量化、请求、sleep、
+wake、KV/prefix-cache reset、LoRA 或 RL 生命周期控制；可选 shell wrapper 只编排
+这些 lifecycle API。MTP 只有显式传入 `--enable-mtp` 才会执行第二个独立 draft
+update。禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoint。
 
 ## 文件
 
@@ -15,6 +15,7 @@ wake、KV/prefix-cache reset、LoRA 或 RL 生命周期控制；这些动作由�
 |---|---|
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、canonical source、stateful NCCL publisher |
 | `run_vllm_weight_update.py` | 只执行一次 checkpoint NCCL weight update 的最小 CLI |
+| `run_vllm_lifecycle.sh` | 一次调用完成 VIME lifecycle 和 publisher 的 shell wrapper |
 
 ## 服务端合同
 
@@ -61,6 +62,29 @@ transaction 的先后顺序。draft 不能脱离已成功的 main transaction �
 调用前服务必须已经处于可更新状态。该命令只执行
 `start_weight_update → metadata/update buckets → finish_weight_update`，不会
 替调用方 pause、sleep、清 cache、发送请求或 resume。
+
+## 可选 lifecycle wrapper
+
+一次调用完成普通更新，严格执行
+`pause(keep) → reset prefix cache → publisher → resume`：
+
+```bash
+./run_vllm_lifecycle.sh http://<server-host>:8000 -- \
+  .venv/bin/python run_vllm_weight_update.py <publisher arguments>
+```
+
+需要完整 colocated/offload cycle 时仍只调用一次：可选 abort 在最前面；随后
+`reset → sleep(2) → wake(weights) → pause → reset → publisher → resume →
+wake(kv_cache)`。VIME 只有在丢弃未完成 rollout 时才执行 abort，因此必须显式启用。
+
+```bash
+./run_vllm_lifecycle.sh http://<server-host>:8000 \
+  --abort-inflight --offload -- \
+  .venv/bin/python run_vllm_weight_update.py <publisher arguments>
+```
+
+publisher 失败时不执行 resume 或 KV wake，服务保持 fail-closed；脚本没有任何
+定时 sleep、重试或 inference 请求。
 
 ## 代码与 VIME 的边界
 
