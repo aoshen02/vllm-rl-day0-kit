@@ -20,6 +20,24 @@ def main() -> None:
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--update-bucket-size-mb", type=int, default=512)
+    parser.add_argument(
+        "--expert-tensor-order",
+        choices=("natural", "lexical"),
+        default="natural",
+        help=(
+            "Order tensors within each complete expert layer. 'lexical' "
+            "matches the physical order of checkpoints written by "
+            "safetensors with lexically sorted names."
+        ),
+    )
+    parser.add_argument(
+        "--direct-file-expert-h2d",
+        action="store_true",
+        help=(
+            "Copy a physically contiguous expert-layer safetensors payload "
+            "directly from its mmap into one GPU allocation."
+        ),
+    )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument(
         "--enable-mtp",
@@ -33,12 +51,14 @@ def main() -> None:
         model=args.model,
         revision=args.revision,
         checkpoint_path=args.checkpoint_path,
+        expert_tensor_order=args.expert_tensor_order,
     )
     publisher = NcclCheckpointPublisher(
         base_url=args.base_url,
         manifest=manifest,
         device=args.device,
         update_bucket_size_bytes=args.update_bucket_size_mb * 1024**2,
+        direct_file_expert_h2d=args.direct_file_expert_h2d,
         timeout_seconds=args.timeout,
     )
     try:
@@ -59,7 +79,5 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"send_weights_completed": True}))
-
-
 if __name__ == "__main__":
     main()

@@ -44,21 +44,25 @@ python run_vllm_weight_update.py \
   --output <result-dir>/weight-update.json
 ```
 
+性能实验可显式设置：
+
+```bash
+  --expert-tensor-order lexical \
+  --direct-file-expert-h2d
+```
+
+`lexical` 仍保持 non-expert 在前、每个 expert layer 完整成组，只调整层内
+tensor 顺序。对于按名称词典序写出的 safetensors，它能使读取顺序匹配文件中的
+物理 offset，避免 `0, 1, 2, ...` 自然排序造成的跨文件区间跳读。
+`--direct-file-expert-h2d` 在 safetensors payload 物理连续时，通过 mmap 将完整
+expert layer 一次复制到 GPU，再返回各 tensor 的 storage-sharing view；不满足
+连续布局时自动退回逐 tensor 路径。
+
 如果 RL rollout 明确启用了 native MTP，才增加：
 
 ```bash
   --enable-mtp
 ```
-
-该选项会执行两个独立事务：
-
-```text
-main:  start_weight_update → buckets → finish_weight_update
-draft: start_draft_weight_update → 同一 canonical source → finish_weight_update
-```
-
-main 和 draft 记录相同的 `weight_epoch`；`update_version` 仅表示两个 NCCL
-transaction 的先后顺序。draft 不能脱离已成功的 main transaction 单独执行。
 
 调用前服务必须已经处于可更新状态。该命令只执行
 `start_weight_update → metadata/update buckets → finish_weight_update`，不会
