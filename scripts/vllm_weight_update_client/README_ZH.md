@@ -16,22 +16,28 @@ update。禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoi
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、canonical source、stateful NCCL publisher |
 | `run_vllm_weight_update.py` | 只执行一次 checkpoint NCCL weight update 的最小 CLI |
 | `run_vllm_lifecycle.sh` | 一次调用完成 VIME lifecycle 和 publisher 的 shell wrapper |
+| `validation/` | GSM8K、fixed-token oracle 以及更新前后结果比较工具 |
+| `provenance/write_run_sidecars.py` | 为结果目录生成 provenance `.meta.json` |
 
 ## 服务端合同
 
-服务端必须使用 NCCL backend，并与 client 完全一致地配置
-`packed`、`packed_buffer_size_bytes`、`packed_num_buffers`；更新期间 inference
-worker world size 不变。示例：
+服务端必须使用 NCCL backend，并启用 `packed`；packed buffer 的大小和 buffer
+数量使用 vLLM 默认值，更新期间 inference worker world size 不变。示例：
 
 ```bash
 --weight-transfer-config \
-'{"backend":"nccl","packed":true,"packed_buffer_size_bytes":1073741824,"packed_num_buffers":2}'
+'{"backend":"nccl","packed":true}'
 ```
 
 client 容器和服务端容器必须使用同一 vLLM runtime。Docker 使用 `--gpus all`，
 容器内再用 `CUDA_VISIBLE_DEVICES` 限制实际计算 GPU。
 
 ## 最小运行命令
+
+checkpoint 必须预先放在 publisher 所在节点的本机 NVMe 上，并通过
+`--checkpoint-path` 指定；不要直接从 Lustre 读取。direct-file H2D 依赖本地
+文件的 mmap 和连续顺序读取，使用 Lustre 会重新引入远端 I/O 和 page fault
+开销，抵消这项优化的收益。
 
 ```bash
 python run_vllm_weight_update.py \
@@ -43,21 +49,25 @@ python run_vllm_weight_update.py \
   --output <result-dir>/weight-update.json
 ```
 
+性能实验可显式设置：
+
+```bash
+  --expert-tensor-order lexical \
+  --direct-file-expert-h2d
+```
+
+`lexical` 仍保持 non-expert 在前、每个 expert layer 完整成组，只调整层内
+tensor 顺序。对于按名称词典序写出的 safetensors，它能使读取顺序匹配文件中的
+物理 offset，避免 `0, 1, 2, ...` 自然排序造成的跨文件区间跳读。
+`--direct-file-expert-h2d` 在 safetensors payload 物理连续时，通过 mmap 将完整
+expert layer 一次复制到 GPU，再返回各 tensor 的 storage-sharing view；不满足
+连续布局时自动退回逐 tensor 路径。
+
 如果 RL rollout 明确启用了 native MTP，才增加：
 
 ```bash
   --enable-mtp
 ```
-
-该选项会执行两个独立事务：
-
-```text
-main:  start_weight_update → buckets → finish_weight_update
-draft: start_draft_weight_update → 同一 canonical source → finish_weight_update
-```
-
-main 和 draft 记录相同的 `weight_epoch`；`update_version` 仅表示两个 NCCL
-transaction 的先后顺序。draft 不能脱离已成功的 main transaction 单独执行。
 
 调用前服务必须已经处于可更新状态。该命令只执行
 `start_weight_update → metadata/update buckets → finish_weight_update`，不会

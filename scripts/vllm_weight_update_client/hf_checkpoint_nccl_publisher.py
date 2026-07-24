@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
+import os
 import re
+import struct
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -22,14 +26,14 @@ import requests
 import torch
 from safetensors import safe_open
 
-from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ParamMeta,
     WeightSource,
-    WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_common import (
+    NCCLWeightTransferInitInfo,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
@@ -55,6 +59,8 @@ _SAFETENSORS_DTYPE_TO_TORCH = {
     "F8_E5M2": (torch.float8_e5m2, 1),
 }
 
+ExpertTensorOrder = Literal["natural", "lexical"]
+
 
 @dataclass(frozen=True)
 class TensorMetadata:
@@ -63,6 +69,9 @@ class TensorMetadata:
     shape: list[int]
     safetensors_dtype: str
     nbytes: int
+    # Absolute byte offsets in the safetensors file. These are internal source
+    # metadata used only by the direct file-backed expert transfer path.
+    file_data_offsets: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,7 @@ class CheckpointManifest:
     tensor_count: int
     total_bytes: int
     manifest_sha256: str
+    expert_tensor_order: ExpertTensorOrder = "natural"
 
     @classmethod
     def load(
@@ -91,12 +101,14 @@ class CheckpointManifest:
         model: str,
         revision: str,
         checkpoint_path: str | None = None,
+        expert_tensor_order: ExpertTensorOrder = "natural",
     ) -> CheckpointManifest:
         root = _resolve_checkpoint(model, revision, checkpoint_path)
-        tensor_entries = _checkpoint_tensor_entries(root)
+        tensor_entries = _checkpoint_tensor_entries(root, expert_tensor_order)
         tensors: list[TensorMetadata] = []
         with ExitStack() as stack:
             opened_files: dict[str, Any] = {}
+            file_layouts: dict[str, dict[str, tuple[int, int]]] = {}
             for name, file_name in tensor_entries:
                 if file_name not in opened_files:
                     opened_files[file_name] = stack.enter_context(
@@ -105,6 +117,9 @@ class CheckpointManifest:
                             framework="pt",
                             device="cpu",
                         )
+                    )
+                    file_layouts[file_name] = _read_safetensors_layout(
+                        root / file_name
                     )
                 tensor_slice = opened_files[file_name].get_slice(name)
                 dtype_name = tensor_slice.get_dtype()
@@ -125,14 +140,11 @@ class CheckpointManifest:
                         shape=shape,
                         safetensors_dtype=dtype_name,
                         nbytes=numel * itemsize,
+                        file_data_offsets=file_layouts[file_name].get(name),
                     )
                 )
 
-        canonical = json.dumps(
-            [asdict(tensor) for tensor in tensors],
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+        manifest_sha256 = _manifest_sha256(tensors)
         return cls(
             model=model,
             revision=revision,
@@ -140,7 +152,8 @@ class CheckpointManifest:
             tensors=tuple(tensors),
             tensor_count=len(tensors),
             total_bytes=sum(tensor.nbytes for tensor in tensors),
-            manifest_sha256=hashlib.sha256(canonical).hexdigest(),
+            manifest_sha256=manifest_sha256,
+            expert_tensor_order=expert_tensor_order,
         )
 
     def iter_cuda_tensors(
@@ -148,7 +161,7 @@ class CheckpointManifest:
     ) -> Iterator[tuple[str, torch.Tensor]]:
         return _CheckpointTensorIterator(self, device)
 
-    def summary(self, buffer_size_bytes: int) -> dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
             "model": self.model,
             "revision": self.revision,
@@ -156,7 +169,7 @@ class CheckpointManifest:
             "tensor_count": self.tensor_count,
             "total_bytes": self.total_bytes,
             "manifest_sha256": self.manifest_sha256,
-            "packed_buffer_size_bytes": buffer_size_bytes,
+            "expert_tensor_order": self.expert_tensor_order,
         }
 
 
@@ -186,11 +199,24 @@ class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
 
     def __init__(self, manifest: CheckpointManifest, device: torch.device) -> None:
         self._root = Path(manifest.checkpoint_path)
-        self._metadata = iter(manifest.tensors)
+        self._metadata = tuple(manifest.tensors)
+        self._metadata_index = 0
         self._device = device
         self._stack = ExitStack()
         self._opened_files: dict[str, Any] = {}
+        self._mapped_files: dict[str, tuple[Any, mmap.mmap]] = {}
         self._closed = False
+        self._timing_enabled = (
+            os.environ.get("K3_WEIGHT_UPDATE_SOURCE_TIMING") == "1"
+        )
+        self._timing_tensor_count = 0
+        self._timing_total_bytes = 0
+        self._timing_get_tensor_seconds = 0.0
+        self._timing_to_device_seconds = 0.0
+        self._timing_cpu_pack_seconds = 0.0
+        self._timing_h2d_copy_count = 0
+        self._timing_h2d_modes: set[str] = set()
+        self._timing_files: set[str] = set()
 
     def __iter__(self) -> _CheckpointTensorIterator:
         return self
@@ -198,11 +224,11 @@ class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
     def __next__(self) -> tuple[str, torch.Tensor]:
         if self._closed:
             raise StopIteration
-        try:
-            metadata = next(self._metadata)
-        except StopIteration:
+        if self._metadata_index >= len(self._metadata):
             self.close_handles()
-            raise
+            raise StopIteration
+        metadata = self._metadata[self._metadata_index]
+        self._metadata_index += 1
 
         opened_file = self._opened_files.get(metadata.file)
         if opened_file is None:
@@ -214,10 +240,164 @@ class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
                 )
             )
             self._opened_files[metadata.file] = opened_file
-        cpu_tensor = opened_file.get_tensor(metadata.name)
+        if self._timing_enabled:
+            get_started = time.perf_counter()
+            cpu_tensor = opened_file.get_tensor(metadata.name)
+            get_seconds = time.perf_counter() - get_started
+            self._timing_tensor_count += 1
+            self._timing_total_bytes += metadata.nbytes
+            self._timing_get_tensor_seconds += get_seconds
+            self._timing_files.add(metadata.file)
+        else:
+            cpu_tensor = opened_file.get_tensor(metadata.name)
+
+        if self._device.type == "cpu":
+            return metadata.name, cpu_tensor
+
+        to_device_started = time.perf_counter()
         cuda_tensor = cpu_tensor.to(device=self._device)
+        if self._timing_enabled:
+            self._timing_to_device_seconds += (
+                time.perf_counter() - to_device_started
+            )
+            self._timing_h2d_copy_count += 1
+            self._timing_h2d_modes.add("per-tensor")
         del cpu_tensor
         return metadata.name, cuda_tensor
+
+    def materialize_contiguous_expert(
+        self,
+        bucket: WeightTransferBucket,
+        device: torch.device,
+    ) -> list[tuple[str, torch.Tensor]] | None:
+        """Map a physically contiguous expert layer and copy it once."""
+        if device.type != "cuda" or bucket.phase != "expert":
+            return None
+        count = len(bucket.metadata)
+        current = self._metadata[
+            self._metadata_index : self._metadata_index + count
+        ]
+        if len(current) != count or [
+            item.name for item in current
+        ] != [item.name for item in bucket.metadata]:
+            raise ValueError("Direct expert source order does not match manifest")
+        if not current or any(item.file_data_offsets is None for item in current):
+            return None
+        file_name = current[0].file
+        if any(item.file != file_name for item in current):
+            return None
+        offsets = [
+            item.file_data_offsets for item in current
+        ]
+        assert all(offset is not None for offset in offsets)
+        concrete_offsets = [
+            (offset[0], offset[1]) for offset in offsets if offset is not None
+        ]
+        if any(
+            concrete_offsets[index][1]
+            != concrete_offsets[index + 1][0]
+            for index in range(len(concrete_offsets) - 1)
+        ):
+            return None
+
+        self._metadata_index += count
+        _, mapped = self._mapped_file(file_name)
+        first_offset = concrete_offsets[0][0]
+        last_offset = concrete_offsets[-1][1]
+        span = last_offset - first_offset
+        cpu_span = torch.frombuffer(
+            mapped,
+            dtype=torch.uint8,
+            count=span,
+            offset=first_offset,
+        )
+        to_device_started = time.perf_counter()
+        device_span = cpu_span.to(device=device)
+        to_device_seconds = time.perf_counter() - to_device_started
+
+        byte_views = torch.split(
+            device_span,
+            [end - start for start, end in concrete_offsets],
+        )
+        named_tensors: list[tuple[str, torch.Tensor]] = []
+        for item, view in zip(current, byte_views):
+            dtype = _SAFETENSORS_DTYPE_TO_TORCH[item.safetensors_dtype][0]
+            named_tensors.append(
+                (item.name, view.view(dtype).view(item.shape))
+            )
+        self._record_direct_timing(
+            file_name=file_name,
+            tensor_count=count,
+            total_bytes=span,
+            to_device_seconds=to_device_seconds,
+        )
+        return named_tensors
+
+    def _mapped_file(self, file_name: str) -> tuple[Any, mmap.mmap]:
+        existing = self._mapped_files.get(file_name)
+        if existing is not None:
+            return existing
+        file_handle = (self._root / file_name).open("rb")
+        mapped = mmap.mmap(file_handle.fileno(), 0, access=mmap.ACCESS_COPY)
+        self._mapped_files[file_name] = (file_handle, mapped)
+        return file_handle, mapped
+
+    def _record_direct_timing(
+        self,
+        *,
+        file_name: str,
+        tensor_count: int,
+        total_bytes: int,
+        to_device_seconds: float,
+    ) -> None:
+        if not self._timing_enabled:
+            return
+        self._timing_tensor_count += tensor_count
+        self._timing_total_bytes += total_bytes
+        self._timing_to_device_seconds += to_device_seconds
+        self._timing_h2d_copy_count += 1
+        self._timing_h2d_modes.add("direct-file-expert")
+        self._timing_files.add(file_name)
+
+    def record_transfer_timing(
+        self,
+        *,
+        to_device_seconds: float,
+        copy_count: int,
+        mode: str,
+        cpu_pack_seconds: float = 0.0,
+    ) -> None:
+        """Record bucket-level transfer work performed outside the iterator."""
+        if not self._timing_enabled:
+            return
+        self._timing_to_device_seconds += to_device_seconds
+        self._timing_cpu_pack_seconds += cpu_pack_seconds
+        self._timing_h2d_copy_count += copy_count
+        self._timing_h2d_modes.add(mode)
+
+    def drain_timing(self) -> dict[str, Any]:
+        """Return and reset source timing accumulated since the last drain."""
+        if not self._timing_enabled:
+            return {}
+        result = {
+            "source_tensor_count": self._timing_tensor_count,
+            "source_total_bytes": self._timing_total_bytes,
+            "source_get_tensor_seconds": self._timing_get_tensor_seconds,
+            "source_to_device_seconds": self._timing_to_device_seconds,
+            "source_cpu_pack_seconds": self._timing_cpu_pack_seconds,
+            "source_h2d_copy_count": self._timing_h2d_copy_count,
+            "source_h2d_modes": sorted(self._timing_h2d_modes),
+            "source_files": sorted(self._timing_files),
+        }
+        self._timing_tensor_count = 0
+        self._timing_total_bytes = 0
+        self._timing_get_tensor_seconds = 0.0
+        self._timing_to_device_seconds = 0.0
+        self._timing_cpu_pack_seconds = 0.0
+        self._timing_h2d_copy_count = 0
+        self._timing_h2d_modes.clear()
+        self._timing_files.clear()
+        return result
 
     def close_handles(self) -> None:
         """Release file-backed mappings without resetting iteration state."""
@@ -226,12 +406,56 @@ class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
         self._stack.close()
         self._stack = ExitStack()
         self._opened_files.clear()
+        for file_handle, mapped in self._mapped_files.values():
+            mapped.close()
+            file_handle.close()
+        self._mapped_files.clear()
 
     def close(self) -> None:
         if self._closed:
             return
         self.close_handles()
         self._closed = True
+
+
+def _manifest_sha256(tensors: list[TensorMetadata] | tuple[TensorMetadata, ...]) -> str:
+    canonical = json.dumps(
+        [
+            {
+                "name": tensor.name,
+                "file": tensor.file,
+                "shape": tensor.shape,
+                "safetensors_dtype": tensor.safetensors_dtype,
+                "nbytes": tensor.nbytes,
+            }
+            for tensor in tensors
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _read_safetensors_layout(
+    path: Path,
+) -> dict[str, tuple[int, int]]:
+    """Read absolute payload offsets without materializing tensor data."""
+    with path.open("rb") as file_handle:
+        header_length_bytes = file_handle.read(8)
+        if len(header_length_bytes) != 8:
+            raise ValueError(f"Invalid safetensors header in {path}")
+        header_length = struct.unpack("<Q", header_length_bytes)[0]
+        header = json.loads(file_handle.read(header_length))
+    data_start = 8 + header_length
+    return {
+        name: (
+            data_start + int(entry["data_offsets"][0]),
+            data_start + int(entry["data_offsets"][1]),
+        )
+        for name, entry in header.items()
+        if name != "__metadata__"
+    }
+
 
 UpdateTarget = Literal["main", "draft"]
 
@@ -258,7 +482,7 @@ class _TargetWeightSyncClient(HTTPVLLMWeightSyncClient):
 
 
 class NcclCheckpointPublisher:
-    """Own one stateful trainer-side NCCL engine and ordered updates."""
+    """Own one Vime-compatible trainer-side NCCL group and ordered updates."""
 
     def __init__(
         self,
@@ -266,54 +490,46 @@ class NcclCheckpointPublisher:
         base_url: str,
         manifest: CheckpointManifest,
         device: str,
-        buffer_size_bytes: int,
         update_bucket_size_bytes: int = 512 * 1024**2,
-        num_buffers: int = 2,
+        direct_file_expert_h2d: bool = False,
         timeout_seconds: int = 600,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.manifest = manifest
         self.device = torch.device(device)
-        self.buffer_size_bytes = buffer_size_bytes
-        self.source = SafetensorsCheckpointSource(manifest, self.device)
         self.update_bucket_size_bytes = update_bucket_size_bytes
-        self.num_buffers = num_buffers
+        self.direct_file_expert_h2d = direct_file_expert_h2d
         self.timeout_seconds = timeout_seconds
         # Match Vime's NCCL path: every bucket uses vLLM packed transfer,
         # including MoE expert buckets.
         self.packed = True
-        self.engine = None
+        self.group = None
+        self.client: _TargetWeightSyncClient | None = None
         self.update_version = 0
         self.weight_epoch = 0
 
     def initialize(self) -> dict[str, Any]:
-        if self.engine is not None:
+        if self.group is not None:
             raise RuntimeError("NCCL publisher is already initialized")
         torch.cuda.set_device(self.device)
         inference_world_size = self._get("/get_world_size")["world_size"]
-        init_info = NCCLTrainerInitInfo(
+        init_info = NCCLWeightTransferInitInfo(
             master_address=get_ip(),
             master_port=get_open_port(),
             rank_offset=1,
             world_size=inference_world_size + 1,
-            rank=0,
         )
-        config = WeightTransferConfig(
-            backend="nccl",
-            packed=self.packed,
-            packed_buffer_size_bytes=self.buffer_size_bytes,
-            packed_num_buffers=self.num_buffers,
+        self.client = _TargetWeightSyncClient(
+            self.base_url,
+            timeout=self.timeout_seconds,
         )
-        self.engine = WeightTransferTrainerFactory.trainer_init(
-            backend="nccl",
-            config=config,
-            init_info=init_info,
-            client=_TargetWeightSyncClient(
-                self.base_url,
-                timeout=self.timeout_seconds,
-            ),
-            source=self.source,
-        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                self.client.init_weight_transfer_engine,
+                asdict(init_info),
+            )
+            self.group = NCCLWeightTransferEngine.trainer_init(init_info)
+            future.result()
         return {
             "backend": "nccl",
             "inference_world_size": inference_world_size,
@@ -324,28 +540,38 @@ class NcclCheckpointPublisher:
                 "master_port": init_info.master_port,
                 "world_size": init_info.world_size,
             },
-            "stateful_trainer_engine": type(self.engine).__name__,
+            "trainer_transport": "NCCLWeightTransferEngine.trainer_send_weights",
             "transport_mode": "packed",
         }
 
-    def publish_update(self, *, target: UpdateTarget = "main") -> dict[str, Any]:
+    def publish_update(
+        self,
+        *,
+        target: UpdateTarget = "main",
+    ) -> dict[str, Any]:
         """Transfer the current source and return transfer provenance.
 
         Lifecycle operations such as pause, sleep, cache invalidation, and
         resume belong to the caller. This method only performs the weight
         transfer transaction itself.
         """
-        if self.engine is None:
+        if self.group is None or self.client is None:
             raise RuntimeError("initialize() must complete before publish")
-        client = self.engine.client
-        if not isinstance(client, _TargetWeightSyncClient):
-            raise TypeError("NCCL publisher client does not support update targets")
         if target == "draft" and self.weight_epoch == 0:
             raise RuntimeError("draft update requires a completed main update")
+        source_device = (
+            torch.device("cpu")
+            if self.direct_file_expert_h2d
+            else self.device
+        )
+        source = SafetensorsCheckpointSource(
+            self.manifest,
+            source_device,
+        )
         weight_epoch = self.weight_epoch + 1 if target == "main" else self.weight_epoch
-        client.set_target(target)
+        self.client.set_target(target)
         with torch.inference_mode():
-            bucket_results = self._send_weights()
+            bucket_results = self._send_weights(source)
         torch.cuda.synchronize(self.device)
         self.update_version += 1
         self.weight_epoch = weight_epoch
@@ -355,21 +581,25 @@ class NcclCheckpointPublisher:
             "target": target,
             "send_weights_completed": True,
             "update_bucket_size_bytes": self.update_bucket_size_bytes,
+            "direct_file_expert_h2d": self.direct_file_expert_h2d,
             "transport_mode": "packed",
             "buckets": bucket_results,
-            **self.manifest.summary(self.buffer_size_bytes),
+            **self.manifest.summary(),
         }
 
-    def _send_weights(self) -> list[dict[str, Any]]:
+    def _send_weights(
+        self,
+        source: SafetensorsCheckpointSource,
+    ) -> list[dict[str, Any]]:
         """Send one update using the required non-expert/expert order."""
-        assert self.engine is not None
-        group = getattr(self.engine, "group", None)
-        if group is None:
-            group = getattr(self.engine, "model_update_group", None)
-        if group is None:
+        if self.group is None or self.client is None:
             raise RuntimeError("NCCL publisher has no initialized trainer group")
+        group = self.group
+        transfer_started = time.perf_counter()
 
-        source_metadata = self.source.metadata()
+        metadata_started = time.perf_counter()
+        source_metadata = source.metadata()
+        metadata_seconds = time.perf_counter() - metadata_started
         expected_names = [item.name for item in source_metadata]
         duplicate_names = _duplicate_names(expected_names)
         if duplicate_names:
@@ -377,10 +607,12 @@ class NcclCheckpointPublisher:
                 "Weight source metadata contains duplicate names: "
                 f"{duplicate_names[:20]}"
             )
+        bucket_build_started = time.perf_counter()
         buckets = _build_vime_transfer_buckets(
             source_metadata,
             self.update_bucket_size_bytes,
         )
+        bucket_build_seconds = time.perf_counter() - bucket_build_started
         transfer_names = [
             item.name for bucket in buckets for item in bucket.metadata
         ]
@@ -390,15 +622,23 @@ class NcclCheckpointPublisher:
                 "non-experts first followed by complete expert-layer groups"
             )
         expected_total_bytes = sum(_param_nbytes(item) for item in source_metadata)
-        source_iter = iter(self.source)
+        source_iter = iter(source)
         bucket_results: list[dict[str, Any]] = []
         sent_names: list[str] = []
         sent_total_bytes = 0
-        self.engine.client.start_weight_update()
+        self.client.start_weight_update()
         update_failed = False
         try:
-            for index, bucket in enumerate(buckets, start=1):
-                named_tensors = _materialize_bucket(source_iter, bucket)
+            for bucket in buckets:
+                bucket_started = time.perf_counter()
+                named_tensors, materialize_seconds = _materialize_bucket_for_device(
+                    source_iter,
+                    bucket,
+                    self.device,
+                    direct_file_expert_h2d=self.direct_file_expert_h2d,
+                )
+                drain_timing = getattr(source_iter, "drain_timing", None)
+                source_timing = drain_timing() if drain_timing is not None else {}
                 update_info = NCCLWeightTransferUpdateInfo(
                     names=[name for name, _ in named_tensors],
                     dtype_names=[
@@ -407,12 +647,11 @@ class NcclCheckpointPublisher:
                     ],
                     shapes=[list(tensor.shape) for _, tensor in named_tensors],
                     packed=True,
-                    packed_buffer_size_bytes=self.buffer_size_bytes,
-                    packed_num_buffers=self.num_buffers,
                 )
+                rpc_started = time.perf_counter()
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
-                        self.engine.client.update_weights,
+                        self.client.update_weights,
                         asdict(update_info),
                     )
                     if future.done():
@@ -422,11 +661,11 @@ class NcclCheckpointPublisher:
                         NCCLTrainerSendWeightsArgs(
                             group=group,
                             packed=True,
-                            packed_buffer_size_bytes=self.buffer_size_bytes,
-                            packed_num_buffers=self.num_buffers,
                         ),
                     )
                     future.result()
+                rpc_seconds = time.perf_counter() - rpc_started
+                bucket_seconds = time.perf_counter() - bucket_started
 
                 bucket_results.append(
                     {
@@ -434,6 +673,15 @@ class NcclCheckpointPublisher:
                         "phase": bucket.phase,
                         "tensor_count": len(named_tensors),
                         "total_bytes": bucket.total_bytes,
+                        "materialize_seconds": materialize_seconds,
+                        "rpc_and_nccl_seconds": rpc_seconds,
+                        "total_seconds": bucket_seconds,
+                        "throughput_gib_per_second": (
+                            bucket.total_bytes / 1024**3 / bucket_seconds
+                            if bucket_seconds > 0
+                            else 0.0
+                        ),
+                        **source_timing,
                     }
                 )
                 sent_names.extend(name for name, _ in named_tensors)
@@ -473,14 +721,23 @@ class NcclCheckpointPublisher:
             close_iterator = getattr(source_iter, "close", None)
             if close_iterator is not None:
                 close_iterator()
+            finish_started = time.perf_counter()
             if not update_failed:
-                self.engine.client.finish_weight_update()
+                self.client.finish_weight_update()
+            finish_seconds = time.perf_counter() - finish_started
+        total_seconds = time.perf_counter() - transfer_started
+        if bucket_results:
+            bucket_results[0]["_timing_summary"] = {
+                "metadata_seconds": metadata_seconds,
+                "bucket_build_seconds": bucket_build_seconds,
+                "finish_rpc_seconds": finish_seconds,
+                "total_seconds": total_seconds,
+            }
         return bucket_results
 
     def shutdown(self) -> None:
-        if self.engine is not None:
-            self.engine.shutdown()
-            self.engine = None
+        self.group = None
+        self.client = None
 
     def _get(self, path: str) -> Any:
         response = requests.get(f"{self.base_url}{path}", timeout=self.timeout_seconds)
@@ -507,13 +764,18 @@ def _resolve_checkpoint(
     return path
 
 
-def _checkpoint_tensor_entries(root: Path) -> list[tuple[str, str]]:
+def _checkpoint_tensor_entries(
+    root: Path,
+    expert_tensor_order: ExpertTensorOrder = "natural",
+) -> list[tuple[str, str]]:
     index_path = root / "model.safetensors.index.json"
     if index_path.is_file():
         weight_map = json.loads(index_path.read_text())["weight_map"]
         return sorted(
             weight_map.items(),
-            key=lambda item: _vime_transfer_name_key(item[0]),
+            key=lambda item: _vime_transfer_name_key(
+                item[0], expert_tensor_order
+            ),
         )
 
     single_file = root / "model.safetensors"
@@ -521,7 +783,12 @@ def _checkpoint_tensor_entries(root: Path) -> list[tuple[str, str]]:
         with safe_open(single_file, framework="pt", device="cpu") as f:
             return [
                 (name, single_file.name)
-                for name in sorted(f.keys(), key=_vime_transfer_name_key)
+                for name in sorted(
+                    f.keys(),
+                    key=lambda name: _vime_transfer_name_key(
+                        name, expert_tensor_order
+                    ),
+                )
             ]
 
     files = sorted(root.glob("*.safetensors"))
@@ -531,7 +798,12 @@ def _checkpoint_tensor_entries(root: Path) -> list[tuple[str, str]]:
     for path in files:
         with safe_open(path, framework="pt", device="cpu") as f:
             result.extend((name, path.name) for name in f)
-    return sorted(result, key=lambda item: _vime_transfer_name_key(item[0]))
+    return sorted(
+        result,
+        key=lambda item: _vime_transfer_name_key(
+            item[0], expert_tensor_order
+        ),
+    )
 
 
 def _natural_name_key(name: str) -> tuple[tuple[int, int | str], ...]:
@@ -549,9 +821,26 @@ def _expert_parent(name: str) -> str | None:
 
 def _vime_transfer_name_key(
     name: str,
-) -> tuple[int, tuple[tuple[int, int | str], ...]]:
-    """Match Vime's non-expert pass followed by layer-grouped experts."""
-    return (int(_expert_parent(name) is not None), _natural_name_key(name))
+    expert_tensor_order: ExpertTensorOrder = "natural",
+) -> tuple[
+    int,
+    tuple[tuple[int, int | str], ...],
+    tuple[tuple[int, int | str], ...],
+]:
+    """Keep expert layers grouped while selecting their within-layer order."""
+    parent = _expert_parent(name)
+    if parent is None:
+        return (0, _natural_name_key(name), ())
+    suffix = name.split(".experts.", 1)[1]
+    if expert_tensor_order == "natural":
+        suffix_key = _natural_name_key(suffix)
+    elif expert_tensor_order == "lexical":
+        suffix_key = ((1, suffix),)
+    else:
+        raise ValueError(
+            f"unknown expert tensor order: {expert_tensor_order!r}"
+        )
+    return (1, _natural_name_key(parent), suffix_key)
 
 
 def _param_nbytes(metadata: ParamMeta) -> int:
@@ -666,3 +955,57 @@ def _materialize_bucket(
             )
         named_tensors.append((name, tensor))
     return named_tensors
+
+
+def _materialize_bucket_for_device(
+    source_iter: Iterator[tuple[str, torch.Tensor]],
+    bucket: WeightTransferBucket,
+    device: torch.device,
+    *,
+    direct_file_expert_h2d: bool = False,
+) -> tuple[list[tuple[str, torch.Tensor]], float]:
+    """Materialize one bucket on a worker thread with an explicit CUDA device."""
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    started = time.perf_counter()
+    if direct_file_expert_h2d and bucket.phase == "expert":
+        direct_materialize = getattr(
+            source_iter,
+            "materialize_contiguous_expert",
+            None,
+        )
+        if direct_materialize is not None:
+            named_tensors = direct_materialize(bucket, device)
+            if named_tensors is not None:
+                return named_tensors, time.perf_counter() - started
+    named_tensors = _materialize_bucket(source_iter, bucket)
+    if named_tensors and named_tensors[0][1].device.type == "cpu":
+        to_device_started = time.perf_counter()
+        named_tensors = [
+            (name, tensor.to(device=device)) for name, tensor in named_tensors
+        ]
+        _record_transfer_timing(
+            source_iter,
+            to_device_seconds=time.perf_counter() - to_device_started,
+            copy_count=len(named_tensors),
+            mode="per-tensor",
+        )
+    return named_tensors, time.perf_counter() - started
+
+
+def _record_transfer_timing(
+    source_iter: Iterator[tuple[str, torch.Tensor]],
+    *,
+    to_device_seconds: float,
+    copy_count: int,
+    mode: str,
+    cpu_pack_seconds: float = 0.0,
+) -> None:
+    record = getattr(source_iter, "record_transfer_timing", None)
+    if record is not None:
+        record(
+            to_device_seconds=to_device_seconds,
+            copy_count=copy_count,
+            mode=mode,
+            cpu_pack_seconds=cpu_pack_seconds,
+        )
