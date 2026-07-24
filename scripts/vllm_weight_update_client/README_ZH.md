@@ -34,6 +34,11 @@ client 容器和服务端容器必须使用同一 vLLM runtime。Docker 使用 `
 
 ## 最小运行命令
 
+checkpoint 必须预先放在 publisher 所在节点的本机 NVMe 上，并通过
+`--checkpoint-path` 指定；不要直接从 Lustre 读取。direct-file H2D 依赖本地
+文件的 mmap 和连续顺序读取，使用 Lustre 会重新引入远端 I/O 和 page fault
+开销，抵消这项优化的收益。
+
 ```bash
 python run_vllm_weight_update.py \
   --base-url http://<server-host>:8000 \
