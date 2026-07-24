@@ -16,16 +16,17 @@ update。禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoi
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、canonical source、stateful NCCL publisher |
 | `run_vllm_weight_update.py` | 只执行一次 checkpoint NCCL weight update 的最小 CLI |
 | `run_vllm_lifecycle.sh` | 一次调用完成 VIME lifecycle 和 publisher 的 shell wrapper |
+| `validation/` | GSM8K、fixed-token oracle 以及更新前后结果比较工具 |
+| `provenance/write_run_sidecars.py` | 为结果目录生成 provenance `.meta.json` |
 
 ## 服务端合同
 
-服务端必须使用 NCCL backend，并与 client 完全一致地配置
-`packed`、`packed_buffer_size_bytes`、`packed_num_buffers`；更新期间 inference
-worker world size 不变。示例：
+服务端必须使用 NCCL backend，并启用 `packed`；packed buffer 的大小和 buffer
+数量使用 vLLM 默认值，更新期间 inference worker world size 不变。示例：
 
 ```bash
 --weight-transfer-config \
-'{"backend":"nccl","packed":true,"packed_buffer_size_bytes":1073741824,"packed_num_buffers":2}'
+'{"backend":"nccl","packed":true}'
 ```
 
 client 容器和服务端容器必须使用同一 vLLM runtime。Docker 使用 `--gpus all`，

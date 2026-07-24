@@ -22,14 +22,14 @@ import requests
 import torch
 from safetensors import safe_open
 
-from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ParamMeta,
     WeightSource,
-    WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+from vllm.distributed.weight_transfer.nccl_common import (
+    NCCLWeightTransferInitInfo,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
@@ -148,7 +148,7 @@ class CheckpointManifest:
     ) -> Iterator[tuple[str, torch.Tensor]]:
         return _CheckpointTensorIterator(self, device)
 
-    def summary(self, buffer_size_bytes: int) -> dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
             "model": self.model,
             "revision": self.revision,
@@ -156,7 +156,6 @@ class CheckpointManifest:
             "tensor_count": self.tensor_count,
             "total_bytes": self.total_bytes,
             "manifest_sha256": self.manifest_sha256,
-            "packed_buffer_size_bytes": buffer_size_bytes,
         }
 
 
@@ -258,7 +257,7 @@ class _TargetWeightSyncClient(HTTPVLLMWeightSyncClient):
 
 
 class NcclCheckpointPublisher:
-    """Own one stateful trainer-side NCCL engine and ordered updates."""
+    """Own one Vime-compatible trainer-side NCCL group and ordered updates."""
 
     def __init__(
         self,
@@ -266,54 +265,45 @@ class NcclCheckpointPublisher:
         base_url: str,
         manifest: CheckpointManifest,
         device: str,
-        buffer_size_bytes: int,
         update_bucket_size_bytes: int = 512 * 1024**2,
-        num_buffers: int = 2,
         timeout_seconds: int = 600,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.manifest = manifest
         self.device = torch.device(device)
-        self.buffer_size_bytes = buffer_size_bytes
         self.source = SafetensorsCheckpointSource(manifest, self.device)
         self.update_bucket_size_bytes = update_bucket_size_bytes
-        self.num_buffers = num_buffers
         self.timeout_seconds = timeout_seconds
         # Match Vime's NCCL path: every bucket uses vLLM packed transfer,
         # including MoE expert buckets.
         self.packed = True
-        self.engine = None
+        self.group = None
+        self.client: _TargetWeightSyncClient | None = None
         self.update_version = 0
         self.weight_epoch = 0
 
     def initialize(self) -> dict[str, Any]:
-        if self.engine is not None:
+        if self.group is not None:
             raise RuntimeError("NCCL publisher is already initialized")
         torch.cuda.set_device(self.device)
         inference_world_size = self._get("/get_world_size")["world_size"]
-        init_info = NCCLTrainerInitInfo(
+        init_info = NCCLWeightTransferInitInfo(
             master_address=get_ip(),
             master_port=get_open_port(),
             rank_offset=1,
             world_size=inference_world_size + 1,
-            rank=0,
         )
-        config = WeightTransferConfig(
-            backend="nccl",
-            packed=self.packed,
-            packed_buffer_size_bytes=self.buffer_size_bytes,
-            packed_num_buffers=self.num_buffers,
+        self.client = _TargetWeightSyncClient(
+            self.base_url,
+            timeout=self.timeout_seconds,
         )
-        self.engine = WeightTransferTrainerFactory.trainer_init(
-            backend="nccl",
-            config=config,
-            init_info=init_info,
-            client=_TargetWeightSyncClient(
-                self.base_url,
-                timeout=self.timeout_seconds,
-            ),
-            source=self.source,
-        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                self.client.init_weight_transfer_engine,
+                asdict(init_info),
+            )
+            self.group = NCCLWeightTransferEngine.trainer_init(init_info)
+            future.result()
         return {
             "backend": "nccl",
             "inference_world_size": inference_world_size,
@@ -324,7 +314,7 @@ class NcclCheckpointPublisher:
                 "master_port": init_info.master_port,
                 "world_size": init_info.world_size,
             },
-            "stateful_trainer_engine": type(self.engine).__name__,
+            "trainer_transport": "NCCLWeightTransferEngine.trainer_send_weights",
             "transport_mode": "packed",
         }
 
@@ -335,15 +325,12 @@ class NcclCheckpointPublisher:
         resume belong to the caller. This method only performs the weight
         transfer transaction itself.
         """
-        if self.engine is None:
+        if self.group is None or self.client is None:
             raise RuntimeError("initialize() must complete before publish")
-        client = self.engine.client
-        if not isinstance(client, _TargetWeightSyncClient):
-            raise TypeError("NCCL publisher client does not support update targets")
         if target == "draft" and self.weight_epoch == 0:
             raise RuntimeError("draft update requires a completed main update")
         weight_epoch = self.weight_epoch + 1 if target == "main" else self.weight_epoch
-        client.set_target(target)
+        self.client.set_target(target)
         with torch.inference_mode():
             bucket_results = self._send_weights()
         torch.cuda.synchronize(self.device)
@@ -357,17 +344,14 @@ class NcclCheckpointPublisher:
             "update_bucket_size_bytes": self.update_bucket_size_bytes,
             "transport_mode": "packed",
             "buckets": bucket_results,
-            **self.manifest.summary(self.buffer_size_bytes),
+            **self.manifest.summary(),
         }
 
     def _send_weights(self) -> list[dict[str, Any]]:
         """Send one update using the required non-expert/expert order."""
-        assert self.engine is not None
-        group = getattr(self.engine, "group", None)
-        if group is None:
-            group = getattr(self.engine, "model_update_group", None)
-        if group is None:
+        if self.group is None or self.client is None:
             raise RuntimeError("NCCL publisher has no initialized trainer group")
+        group = self.group
 
         source_metadata = self.source.metadata()
         expected_names = [item.name for item in source_metadata]
@@ -394,7 +378,7 @@ class NcclCheckpointPublisher:
         bucket_results: list[dict[str, Any]] = []
         sent_names: list[str] = []
         sent_total_bytes = 0
-        self.engine.client.start_weight_update()
+        self.client.start_weight_update()
         update_failed = False
         try:
             for index, bucket in enumerate(buckets, start=1):
@@ -407,12 +391,10 @@ class NcclCheckpointPublisher:
                     ],
                     shapes=[list(tensor.shape) for _, tensor in named_tensors],
                     packed=True,
-                    packed_buffer_size_bytes=self.buffer_size_bytes,
-                    packed_num_buffers=self.num_buffers,
                 )
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
-                        self.engine.client.update_weights,
+                        self.client.update_weights,
                         asdict(update_info),
                     )
                     if future.done():
@@ -422,8 +404,6 @@ class NcclCheckpointPublisher:
                         NCCLTrainerSendWeightsArgs(
                             group=group,
                             packed=True,
-                            packed_buffer_size_bytes=self.buffer_size_bytes,
-                            packed_num_buffers=self.num_buffers,
                         ),
                     )
                     future.result()
@@ -474,13 +454,12 @@ class NcclCheckpointPublisher:
             if close_iterator is not None:
                 close_iterator()
             if not update_failed:
-                self.engine.client.finish_weight_update()
+                self.client.finish_weight_update()
         return bucket_results
 
     def shutdown(self) -> None:
-        if self.engine is not None:
-            self.engine.shutdown()
-            self.engine = None
+        self.group = None
+        self.client = None
 
     def _get(self, path: str) -> Any:
         response = requests.get(f"{self.base_url}{path}", timeout=self.timeout_seconds)
