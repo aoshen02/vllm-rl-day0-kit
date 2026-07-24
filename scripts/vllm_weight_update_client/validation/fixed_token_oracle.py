@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import urllib.error
 import urllib.request
 
 
@@ -18,8 +19,14 @@ def request_json(
         headers=request_headers,
         method="GET" if payload is None else "POST",
     )
-    with urllib.request.urlopen(request, timeout=600) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"HTTP {exc.code} for {url}; response body: {body}"
+        ) from exc
 
 
 def main() -> None:

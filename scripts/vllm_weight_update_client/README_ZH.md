@@ -7,7 +7,8 @@ vLLM 原生 NCCL weight-transfer engine 发送给服务端。
 当前 active path 只有 `checkpoint_passthrough`。publisher 不做量化、请求、sleep、
 wake、KV/prefix-cache reset、LoRA 或 RL 生命周期控制；可选 shell wrapper 只编排
 这些 lifecycle API。MTP 只有显式传入 `--enable-mtp` 才会执行第二个独立 draft
-update。禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoint。
+update；独立 DraftModel 使用单独的 draft manifest 和 `--enable-draft-update`。
+禁止隐式从 Hugging Face 下载，必须显式传入本地 checkpoint。
 
 ## 文件
 
@@ -68,6 +69,29 @@ expert layer 一次复制到 GPU，再返回各 tensor 的 storage-sharing view�
 ```bash
   --enable-mtp
 ```
+
+独立 DraftModel 使用另一份本地 checkpoint，并在 main transaction 成功后
+执行独立的 draft transaction：
+
+```bash
+  --enable-draft-update \
+  --draft-model <draft-model-name> \
+  --draft-revision <draft-revision> \
+  --draft-checkpoint-path <local-draft-checkpoint>
+```
+
+两种模式的顺序分别是：
+
+```text
+MTP:    main manifest → start_weight_update → buckets → finish
+        → start_draft_weight_update → buckets → finish
+DraftModel: main manifest → start_weight_update → buckets → finish
+        → draft manifest → start_draft_weight_update → buckets → finish
+```
+
+DraftModel checkpoint 里的共享 embedding 和未使用的输出头由 draft loader 自己
+处理；publisher 不再复制 loader 的过滤规则，只传输该 checkpoint 的完整
+manifest，并分别记录 main/draft 的 tensor 数量、字节数和 manifest hash。
 
 调用前服务必须已经处于可更新状态。该命令只执行
 `start_weight_update → metadata/update buckets → finish_weight_update`，不会

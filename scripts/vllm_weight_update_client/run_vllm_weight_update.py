@@ -18,6 +18,9 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--checkpoint-path")
+    parser.add_argument("--draft-model")
+    parser.add_argument("--draft-revision")
+    parser.add_argument("--draft-checkpoint-path")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--update-bucket-size-mb", type=int, default=512)
     parser.add_argument(
@@ -44,8 +47,25 @@ def main() -> None:
         action="store_true",
         help="Send the same canonical checkpoint to the draft model after main.",
     )
+    parser.add_argument(
+        "--enable-draft-update",
+        action="store_true",
+        help="Send an independent checkpoint to the speculative draft model.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    if args.enable_mtp and args.enable_draft_update:
+        parser.error("--enable-mtp and --enable-draft-update are mutually exclusive")
+    if args.enable_draft_update and not (
+        args.draft_model
+        and args.draft_revision
+        and args.draft_checkpoint_path
+    ):
+        parser.error(
+            "--enable-draft-update requires --draft-model, --draft-revision, "
+            "and --draft-checkpoint-path"
+        )
 
     manifest = CheckpointManifest.load(
         model=args.model,
@@ -53,6 +73,14 @@ def main() -> None:
         checkpoint_path=args.checkpoint_path,
         expert_tensor_order=args.expert_tensor_order,
     )
+    draft_manifest = None
+    if args.enable_draft_update:
+        draft_manifest = CheckpointManifest.load(
+            model=args.draft_model,
+            revision=args.draft_revision,
+            checkpoint_path=args.draft_checkpoint_path,
+            expert_tensor_order=args.expert_tensor_order,
+        )
     publisher = NcclCheckpointPublisher(
         base_url=args.base_url,
         manifest=manifest,
@@ -66,6 +94,13 @@ def main() -> None:
         updates = [publisher.publish_update(target="main")]
         if args.enable_mtp:
             updates.append(publisher.publish_update(target="draft"))
+        elif draft_manifest is not None:
+            updates.append(
+                publisher.publish_update(
+                    target="draft",
+                    manifest=draft_manifest,
+                )
+            )
     finally:
         publisher.shutdown()
 
@@ -73,6 +108,10 @@ def main() -> None:
         "checkpoint": manifest.summary(),
         "initialization": initialization,
         "mtp_enabled": args.enable_mtp,
+        "independent_draft_enabled": draft_manifest is not None,
+        "draft_checkpoint": (
+            draft_manifest.summary() if draft_manifest is not None else None
+        ),
         "update": updates[0],
         "updates": updates,
     }

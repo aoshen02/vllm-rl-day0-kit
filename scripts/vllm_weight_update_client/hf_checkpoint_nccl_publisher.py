@@ -548,6 +548,7 @@ class NcclCheckpointPublisher:
         self,
         *,
         target: UpdateTarget = "main",
+        manifest: CheckpointManifest | None = None,
     ) -> dict[str, Any]:
         """Transfer the current source and return transfer provenance.
 
@@ -559,13 +560,14 @@ class NcclCheckpointPublisher:
             raise RuntimeError("initialize() must complete before publish")
         if target == "draft" and self.weight_epoch == 0:
             raise RuntimeError("draft update requires a completed main update")
+        transfer_manifest = manifest or self.manifest
         source_device = (
             torch.device("cpu")
             if self.direct_file_expert_h2d
             else self.device
         )
         source = SafetensorsCheckpointSource(
-            self.manifest,
+            transfer_manifest,
             source_device,
         )
         weight_epoch = self.weight_epoch + 1 if target == "main" else self.weight_epoch
@@ -584,7 +586,7 @@ class NcclCheckpointPublisher:
             "direct_file_expert_h2d": self.direct_file_expert_h2d,
             "transport_mode": "packed",
             "buckets": bucket_results,
-            **self.manifest.summary(),
+            **transfer_manifest.summary(),
         }
 
     def _send_weights(
@@ -629,7 +631,7 @@ class NcclCheckpointPublisher:
         self.client.start_weight_update()
         update_failed = False
         try:
-            for bucket in buckets:
+            for index, bucket in enumerate(buckets):
                 bucket_started = time.perf_counter()
                 named_tensors, materialize_seconds = _materialize_bucket_for_device(
                     source_iter,
