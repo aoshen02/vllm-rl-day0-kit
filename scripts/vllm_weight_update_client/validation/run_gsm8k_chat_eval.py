@@ -21,8 +21,9 @@ async def evaluate(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     records: list[dict] = [{} for _ in prompts]
     timeout = aiohttp.ClientTimeout(total=1800)
     semaphore = asyncio.Semaphore(args.concurrency)
+    connector = aiohttp.TCPConnector(limit=args.concurrency)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         async def request_one(index: int) -> None:
             payload = {
                 "model": args.model,
@@ -90,6 +91,7 @@ async def evaluate(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "temperature": 0.0,
         "seed": 42,
         "concurrency": args.concurrency,
+        "connection_limit": args.concurrency,
         "scored_text": "completion text",
     }
     return summary, records
