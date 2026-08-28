@@ -31,13 +31,13 @@ from vllm.distributed.weight_transfer import (
     ParamMeta,
     WeightSource,
 )
-from vllm.distributed.weight_transfer.nccl_common import (
-    NCCLWeightTransferInitInfo,
-)
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+    NCCLTrainerInitInfo,
+    NCCLTrainerWeightTransferEngine,
     NCCLWeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.packed_tensor import (
+    packed_nccl_broadcast_producer,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -513,23 +513,23 @@ class NcclCheckpointPublisher:
             raise RuntimeError("NCCL publisher is already initialized")
         torch.cuda.set_device(self.device)
         inference_world_size = self._get("/get_world_size")["world_size"]
-        init_info = NCCLWeightTransferInitInfo(
+        init_info = NCCLTrainerInitInfo(
             master_address=get_ip(),
             master_port=get_open_port(),
-            rank_offset=1,
             world_size=inference_world_size + 1,
+            rank=0,
+            packed=True,
         )
         self.client = _TargetWeightSyncClient(
             self.base_url,
             timeout=self.timeout_seconds,
         )
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                self.client.init_weight_transfer_engine,
-                asdict(init_info),
-            )
-            self.group = NCCLWeightTransferEngine.trainer_init(init_info)
-            future.result()
+        trainer_engine = NCCLTrainerWeightTransferEngine.trainer_init(
+            init_info,
+            client=self.client,
+            source=SafetensorsCheckpointSource(self.manifest, self.device),
+        )
+        self.group = trainer_engine.model_update_group
         return {
             "backend": "nccl",
             "inference_world_size": inference_world_size,
@@ -540,7 +540,7 @@ class NcclCheckpointPublisher:
                 "master_port": init_info.master_port,
                 "world_size": init_info.world_size,
             },
-            "trainer_transport": "NCCLWeightTransferEngine.trainer_send_weights",
+            "trainer_transport": "packed_nccl_broadcast_producer",
             "transport_mode": "packed",
         }
 
@@ -648,7 +648,6 @@ class NcclCheckpointPublisher:
                         for _, tensor in named_tensors
                     ],
                     shapes=[list(tensor.shape) for _, tensor in named_tensors],
-                    packed=True,
                 )
                 rpc_started = time.perf_counter()
                 with ThreadPoolExecutor(max_workers=1) as executor:
@@ -658,12 +657,11 @@ class NcclCheckpointPublisher:
                     )
                     if future.done():
                         future.result()
-                    NCCLWeightTransferEngine.trainer_send_weights(
-                        iter(named_tensors),
-                        NCCLTrainerSendWeightsArgs(
-                            group=group,
-                            packed=True,
-                        ),
+                    packed_nccl_broadcast_producer(
+                        iterator=iter(named_tensors),
+                        group=group,
+                        src=0,
+                        post_iter_func=lambda item: item[1],
                     )
                     future.result()
                 rpc_seconds = time.perf_counter() - rpc_started
