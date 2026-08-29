@@ -500,9 +500,6 @@ class NcclCheckpointPublisher:
         self.update_bucket_size_bytes = update_bucket_size_bytes
         self.direct_file_expert_h2d = direct_file_expert_h2d
         self.timeout_seconds = timeout_seconds
-        # Match Vime's NCCL path: every bucket uses vLLM packed transfer,
-        # including MoE expert buckets.
-        self.packed = True
         self.group = None
         self.client: _TargetWeightSyncClient | None = None
         self.update_version = 0

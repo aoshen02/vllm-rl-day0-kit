@@ -32,6 +32,7 @@ update；独立 DraftModel 使用单独的 draft manifest 和 `--enable-draft-up
 
 client 容器和服务端容器必须使用同一 vLLM runtime。Docker 使用 `--gpus all`，
 容器内再用 `CUDA_VISIBLE_DEVICES` 限制实际计算 GPU。
+publisher trainer rank 与 serving rank 必须使用不同的物理 GPU。
 
 ## 最小运行命令
 
@@ -124,7 +125,8 @@ publisher 失败时不执行 resume 或 KV wake，服务保持 fail-closed；脚
 
 publisher 保持 VIME 的 NCCL 事务顺序：先发送 non-expert buckets，再发送完整的
 expert-layer buckets；每个 bucket 先 metadata RPC，再调用 vLLM 的
-`trainer_send_weights`，所有参数、dtype、shape、字节数和顺序校验通过后才 finish。
+`packed_nccl_broadcast_producer`，所有参数、dtype、shape、字节数和顺序校验
+通过后才 finish。
 source 是唯一的 canonical HF producer，NCCL 是 sink。任何失败都不调用 finish，
 避免把部分更新报告为成功。
 

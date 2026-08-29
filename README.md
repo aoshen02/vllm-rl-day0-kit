@@ -39,6 +39,7 @@ during an update:
 ```
 
 Client and server containers must share the same vLLM runtime.
+The publisher trainer rank and serving ranks must use different physical GPUs.
 
 ### Minimal run
 
