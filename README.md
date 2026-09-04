@@ -22,7 +22,9 @@ Megatron, or Transformers dependency — it talks to vLLM directly.
 | `hf_checkpoint_nccl_publisher.py` | Checkpoint manifest, canonical source, stateful NCCL publisher |
 | `run_vllm_weight_update.py` | Minimal CLI: one checkpoint NCCL weight-update transaction |
 | `run_vllm_lifecycle.sh` | Optional wrapper orchestrating pause / reset / sleep / wake / resume around the publisher |
-| `validation/` | Fixed-token oracle, GSM8K eval, and pre/post comparison |
+| `validation/run_gsm8k_chat_eval.py` | Deterministic GSM8K requests through the OpenAI-compatible chat API |
+| `validation/compare_gsm8k_records.py` | Exact pre/post GSM8K record comparison |
+| `validation/fixed_token_oracle.py` | Fixed-token request and response capture |
 | `provenance/write_run_sidecars.py` | Emits `.meta.json` provenance sidecars for a result directory |
 
 Full usage notes are in
@@ -62,6 +64,30 @@ finish_weight_update`. It does not pause, sleep, clear caches, send requests, or
 resume on your behalf, and it never calls `finish` on a failed transfer — a
 partial update is never reported as success.
 
+### Deterministic GSM8K gate
+
+Identity updates must preserve each deterministic response, not only aggregate
+accuracy. The standalone evaluator reads `<dataset-dir>/{train,test}.jsonl`,
+sends fixed-seed requests to `/v1/chat/completions`, and records every response:
+
+```bash
+mkdir -p results/gsm8k
+uv run python scripts/vllm_weight_update_client/validation/run_gsm8k_chat_eval.py \
+  --host http://127.0.0.1 --port 8000 --model <served-model> \
+  --dataset-dir <dataset-dir> --num-questions 32 --concurrency 32 \
+  --output results/gsm8k/before-summary.json \
+  --details results/gsm8k/before.jsonl
+
+# Run the weight-update lifecycle, then repeat the command with after-* outputs.
+
+uv run python scripts/vllm_weight_update_client/validation/compare_gsm8k_records.py \
+  results/gsm8k/before.jsonl results/gsm8k/after.jsonl \
+  results/gsm8k/comparison.json
+```
+
+The comparator exits successfully only when the record count and all stable
+response fields match exactly. Request failures are failures, not skipped rows.
+
 ## 2. Source snapshot — `scripts/rl_source_snapshot.py`
 
 Before an experiment starts, turns the current (possibly uncommitted) state of a
@@ -95,7 +121,7 @@ default image, path, or host must be set explicitly for your environment.
 
 ```bash
 uv venv --python 3.12
-uv pip install pyyaml pytest
+uv sync --extra test
 .venv/bin/python -m pytest tests/ -v
 ```
 

@@ -1,14 +1,17 @@
 {
   "agent": "codex",
-  "artifact": "GSM8K raw-completions evaluator",
-  "cmd": "python run_gsm8k_chat_eval.py --host ... --model ... --output ... --details ... (records correct_count)",
-  "git_commit": "c7ce03bcbd380d0e94490abb111fe48861c16343",
+  "artifact": "GSM8K chat-completions evaluator",
+  "cmd": "python run_gsm8k_chat_eval.py --dataset-dir DATASET --model MODEL --output summary.json --details records.jsonl",
+  "git_commit": "uncommitted",
+  "sha256": "0d94230cb7d2b85963e2e7ac2bec18ecc203f8516263b11aa7cd0bd793d1426a",
   "env_pins": {
-    "endpoint": "/v1/completions",
-    "dataset": "GSM8K test, 1319 questions, 5-shot",
+    "endpoint": "/v1/chat/completions",
+    "dataset": "local GSM8K train.jsonl and test.jsonl; expected hashes are informational",
+    "train_sha256": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+    "test_sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
     "aiohttp_connection_limit": "matches --concurrency",
     "temperature": 0.0,
     "seed": 42
   },
-  "ts": 1784505492
+  "ts": 1788126229
 }

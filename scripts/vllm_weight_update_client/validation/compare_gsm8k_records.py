@@ -7,7 +7,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 INVALID = -9999999
 
 
@@ -23,6 +22,7 @@ def comparable(record: dict) -> dict:
             "label",
             "prediction",
             "content",
+            "reasoning_content",
             "finish_reason",
             "completion_tokens",
             "error",
@@ -68,14 +68,10 @@ def main() -> None:
             for index, (left, right) in enumerate(zip(before, after))
             if left != right
         ],
-        "before_summary": {
-            **summary(before_records),
-        },
-        "after_summary": {
-            **summary(after_records),
-        },
+        "same_count": len(before) == len(after),
+        "before_summary": summary(before_records),
+        "after_summary": summary(after_records),
     }
-    result["same_count"] = len(before) == len(after)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True))
     raise SystemExit(0 if result["same_records"] and result["same_count"] else 1)

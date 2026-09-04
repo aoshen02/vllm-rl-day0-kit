@@ -17,7 +17,9 @@ update；独立 DraftModel 使用单独的 draft manifest 和 `--enable-draft-up
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、canonical source、stateful NCCL publisher |
 | `run_vllm_weight_update.py` | 只执行一次 checkpoint NCCL weight update 的最小 CLI |
 | `run_vllm_lifecycle.sh` | 一次调用完成 VIME lifecycle 和 publisher 的 shell wrapper |
-| `validation/` | GSM8K、fixed-token oracle 以及更新前后结果比较工具 |
+| `validation/run_gsm8k_chat_eval.py` | 通过 OpenAI-compatible chat API 发送确定性 GSM8K 请求 |
+| `validation/compare_gsm8k_records.py` | 精确比较更新前后的 GSM8K 逐题记录 |
+| `validation/fixed_token_oracle.py` | 发送 fixed-token 请求并保存响应 |
 | `provenance/write_run_sidecars.py` | 为结果目录生成 provenance `.meta.json` |
 
 ## 服务端合同
@@ -120,6 +122,30 @@ wake(kv_cache)`。VIME 只有在丢弃未完成 rollout 时才执行 abort，因
 
 publisher 失败时不执行 resume 或 KV wake，服务保持 fail-closed；脚本没有任何
 定时 sleep、重试或 inference 请求。
+
+## GSM8K 确定性验证
+
+Identity update 要求更新前后的每条确定性响应相同，不只是总分相同。
+Evaluator 读取 `<dataset-dir>/{train,test}.jsonl`，向
+`/v1/chat/completions` 发送 fixed-seed 请求并保存逐题记录：
+
+```bash
+mkdir -p results/gsm8k
+uv run python validation/run_gsm8k_chat_eval.py \
+  --host http://127.0.0.1 --port 8000 --model <served-model> \
+  --dataset-dir <dataset-dir> --num-questions 32 --concurrency 32 \
+  --output results/gsm8k/before-summary.json \
+  --details results/gsm8k/before.jsonl
+
+# 执行 weight-update lifecycle，然后用 after-* 输出重复上述命令。
+
+uv run python validation/compare_gsm8k_records.py \
+  results/gsm8k/before.jsonl results/gsm8k/after.jsonl \
+  results/gsm8k/comparison.json
+```
+
+只有记录数量和全部稳定响应字段完全相同时，comparator 才返回成功；
+任何请求失败都算验证失败。
 
 ## 代码与 VIME 的边界
 

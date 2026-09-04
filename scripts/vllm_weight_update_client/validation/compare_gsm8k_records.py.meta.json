@@ -1,11 +1,12 @@
 {
-  "artifact": "GSM8K before/after identity-update record comparator",
-  "cmd": "compare_gsm8k_records.py before.jsonl after.jsonl record-compare.json",
-  "git_commit": "working-tree weight-transfer/reload patch",
+  "artifact": "GSM8K exact chat-record diagnostic comparator",
+  "cmd": "python compare_gsm8k_records.py before.jsonl after.jsonl comparison.json",
+  "git_commit": "uncommitted",
+  "sha256": "47c280e0b7519344a333ffa3995b0719c2c2491ddc63a4413afe7f220ec85ce0",
   "env_pins": {
     "model": "model supplied by the caller",
-    "comparison": "exact completion records excluding nondeterministic response IDs"
+    "comparison": "exact chat content, reasoning content, prediction, finish reason, token count, label, index, and error fields excluding response IDs"
   },
   "agent": "codex",
-  "ts": 1784505492
+  "ts": 1788126618
 }
